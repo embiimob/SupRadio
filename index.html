@@ -5002,6 +5002,32 @@
 
 
     // ═══════════════════════════════════════════════════════════════════════
+    // Screen Wake Lock
+    // ═══════════════════════════════════════════════════════════════════════
+    let wakeLock = null;
+
+    async function requestWakeLock() {
+      if ('wakeLock' in navigator) {
+        try {
+          if (wakeLock !== null) return;
+          wakeLock = await navigator.wakeLock.request('screen');
+          wakeLock.addEventListener('release', () => {
+            wakeLock = null;
+          });
+        } catch (err) {
+          console.warn(`Wake Lock error: ${err.name}, ${err.message}`);
+        }
+      }
+    }
+
+    document.addEventListener('visibilitychange', () => {
+      // Re-request the lock if the document becomes visible again
+      if (document.visibilityState === 'visible') {
+        requestWakeLock();
+      }
+    });
+
+    // ═══════════════════════════════════════════════════════════════════════
     // SupRadio Audio Visualization System
     // ═══════════════════════════════════════════════════════════════════════
     let audioCtx = null;
@@ -5232,11 +5258,14 @@
     }
 
     let currentVizColorHue = 120; // Default green
+    let currentVizNumLines = 5;
 
     function pickNewVizColor() {
        // Randomly pick a hue: Green (120), Cyan (180), Blue (210), Purple (270), Magenta (300), Red (0), Orange (30), Yellow (60)
        const hues = [0, 30, 60, 120, 180, 210, 270, 300];
        currentVizColorHue = hues[Math.floor(Math.random() * hues.length)];
+       // Randomly pick number of lines between 3 and 8
+       currentVizNumLines = Math.floor(Math.random() * (8 - 3 + 1)) + 3;
     }
 
     function drawViz(canvas, frame) {
@@ -5248,16 +5277,15 @@
       const mid = getAvgAmplitude(freq, 10, 80);
       const high = getAvgAmplitude(freq, 80, 200);
 
-      renderMultiWave(ctx, W, H, freq, wave, bass, mid, high, frame);
+      renderMultiWave(ctx, W, H, freq, wave, bass, mid, high, frame, currentVizNumLines);
     }
 
-    function renderMultiWave(ctx, W, H, freq, wave, bass, mid, high, frame) {
+    function renderMultiWave(ctx, W, H, freq, wave, bass, mid, high, frame, numLines) {
        ctx.save();
        // Base clear with a slight trailing effect
        ctx.fillStyle = `rgba(5, 5, 5, 0.2)`;
        ctx.fillRect(0, 0, W, H);
 
-       const numLines = 5;
        const sliceWidth = W * 1.0 / wave.length;
        const t = frame * 0.05;
 
@@ -5334,9 +5362,15 @@
       window.addEventListener('resize', () => measureTicker());
       attachAudioListeners(dom.audio);
       window.addEventListener('resize', resizeCanvas);
-      // Resume AudioContext on any interaction (browser autoplay policy)
-      document.addEventListener('click', resumeAudioContext, { once: false });
-      document.addEventListener('touchstart', resumeAudioContext, { once: false });
+      // Resume AudioContext and request Wake Lock on any interaction (browser autoplay policy)
+      document.addEventListener('click', () => {
+        resumeAudioContext();
+        requestWakeLock();
+      }, { once: false });
+      document.addEventListener('touchstart', () => {
+        resumeAudioContext();
+        requestWakeLock();
+      }, { once: false });
       dom.audioBtn.addEventListener('click', toggleAudio);
       dom.downloadBtn.addEventListener('click', downloadIndexHtml);
       dom.fullscreenBtn.addEventListener('click', requestFullscreen);
