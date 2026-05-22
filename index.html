@@ -4682,6 +4682,9 @@
         probe.setAttribute('playsinline', '');
         probe.setAttribute('aria-label', dom.audio.getAttribute('aria-label') || 'SupRadio audio player');
         probe.tabIndex = dom.audio.tabIndex;
+        dom.audio.pause();
+        dom.audio.removeAttribute('src');
+        dom.audio.load();
         dom.audio.parentNode.replaceChild(probe, dom.audio);
         dom.audio = probe;
         stopPreloadPoller(entry.url);
@@ -5053,7 +5056,12 @@
 
     let sourceNodeMap = new WeakMap();
 
+    function isIOS() {
+      return /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    }
+
     function connectAudioToAnalyser() {
+      if (isIOS()) return;
       ensureAudioContext();
       try {
         if (audioSourceNode) {
@@ -5242,7 +5250,19 @@
 
     // ── Main visualization renderer ───────────────────────────────────────
     function getAudioData() {
-      if (!analyserNode) return { freq: new Uint8Array(512), wave: new Uint8Array(512) };
+      if (!analyserNode || isIOS()) {
+        const bufLen = 512;
+        const wave = new Uint8Array(bufLen);
+        const freq = new Uint8Array(bufLen);
+        const t = Date.now() / 500;
+        const isPlaying = dom.audio && !dom.audio.paused && dom.audio.currentTime > 0;
+        const amplitude = isPlaying ? 30 : 0;
+        for (let i = 0; i < bufLen; i++) {
+          wave[i] = 128 + Math.sin(i * 0.05 + t) * amplitude;
+          freq[i] = isPlaying ? Math.max(0, 100 - i * 0.5 + Math.random() * 20) : 0;
+        }
+        return { freq, wave };
+      }
       const bufLen = analyserNode.frequencyBinCount;
       const freq = new Uint8Array(bufLen);
       const wave = new Uint8Array(bufLen);
