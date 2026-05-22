@@ -1390,7 +1390,7 @@
     };
 
     const DEFAULT_KEYWORD = 'mp3';
-    const MAX_PLAYLIST_ITEMS = 50;
+    const KEYWORD_MAX_PLAYLIST_ITEMS = 50;
     const TRENDING_MAX_PLAYLIST_ITEMS = 500;
     const TRENDING_KEYWORD_LIMIT = 20;
     const TRENDING_STATS_LIMIT = 100;
@@ -3609,7 +3609,7 @@
         : '';
       dom.ticker.textContent = statusCards.length
         ? `${tickerLabel(keyword)}${summary}${trendingText ? `${TICKER_SECTION_SEPARATOR}${trendingText}` : ''}${TICKER_SECTION_SEPARATOR}${statusCards.join(TICKER_ITEM_SEPARATOR)}`
-        : `${tickerLabel(keyword)}${summary}${trendingText ? `${TICKER_SECTION_SEPARATOR}${trendingText}` : ''} • No matching videos`;
+        : `${tickerLabel(keyword)}${summary}${trendingText ? `${TICKER_SECTION_SEPARATOR}${trendingText}` : ''} • No matching audio files`;
       measureTicker();
       ensureTickerAnimation();
       renderBannerQueue();
@@ -4801,7 +4801,7 @@
           clearTimeout(activeStreamTimeoutId);
           activeStreamTimeoutId = null;
         }
-        const maxItems = isTrendingDefault ? TRENDING_MAX_PLAYLIST_ITEMS : MAX_PLAYLIST_ITEMS;
+        const maxItems = isTrendingDefault ? TRENDING_MAX_PLAYLIST_ITEMS : KEYWORD_MAX_PLAYLIST_ITEMS;
         playQueue = items.filter((item) => !trashedVideoUrls.has(item.url)).slice(0, maxItems);
         updateTicker(playQueue, displayKeyword);
         prepareSocialFeed(messages, displayKeyword, addressLabels);
@@ -4848,12 +4848,7 @@
           if (!getNativeFullscreenElement()) throw new Error(`WebKit fullscreen did not activate after ${FULLSCREEN_ACTIVATION_DELAY_MS}ms`);
           return;
         }
-        if (false) { // audio has no webkitEnterFullscreen
-          null /* audio has no webkitEnterFullscreen */();
-          await new Promise((resolve) => window.setTimeout(resolve, FULLSCREEN_ACTIVATION_DELAY_MS));
-          if (!false) throw new Error(`Video WebKit fullscreen did not activate after ${FULLSCREEN_ACTIVATION_DELAY_MS}ms`);
-          return;
-        }
+
       } catch (error) {
         console.warn('Native fullscreen request failed, using pseudo-fullscreen fallback mode', error);
       }
