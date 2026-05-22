@@ -5188,6 +5188,7 @@
       const canvas = dom.visualizerCanvas;
       if (!canvas) return;
       resizeCanvas();
+      pickNewVizColor();
       let frame = Math.floor(Math.random() * 10000);
       function tick() {
         vizAnimFrameId = requestAnimationFrame(tick);
@@ -5230,27 +5231,15 @@
       return sum / (end - start) / 255;
     }
 
-    let currentVizIndex = 0;
-    let nextVizIndex = 0;
-    let vizTransitionProgress = 1.0;
-    const NUM_VIZ_MODES = 8;
-    const VIZ_DURATION_FRAMES = 600; // ~10 seconds at 60fps
-    const VIZ_TRANSITION_FRAMES = 120; // 2 seconds blend
+    let currentVizColorHue = 120; // Default green
+
+    function pickNewVizColor() {
+       // Randomly pick a hue: Green (120), Cyan (180), Blue (210), Purple (270), Magenta (300), Red (0), Orange (30), Yellow (60)
+       const hues = [0, 30, 60, 120, 180, 210, 270, 300];
+       currentVizColorHue = hues[Math.floor(Math.random() * hues.length)];
+    }
 
     function drawViz(canvas, frame) {
-      if (frame % VIZ_DURATION_FRAMES === 0 && frame > 0) {
-        nextVizIndex = (currentVizIndex + 1) % NUM_VIZ_MODES;
-        vizTransitionProgress = 0.0;
-      }
-
-      if (vizTransitionProgress < 1.0) {
-        vizTransitionProgress += 1.0 / VIZ_TRANSITION_FRAMES;
-        if (vizTransitionProgress >= 1.0) {
-          vizTransitionProgress = 1.0;
-          currentVizIndex = nextVizIndex;
-        }
-      }
-
       const ctx = canvas.getContext('2d');
       const W = canvas.width;
       const H = canvas.height;
@@ -5259,216 +5248,55 @@
       const mid = getAvgAmplitude(freq, 10, 80);
       const high = getAvgAmplitude(freq, 80, 200);
 
-      // Render mode
-      if (vizTransitionProgress < 1.0) {
-         renderVizMode(ctx, currentVizIndex, W, H, freq, wave, bass, mid, high, frame, 1.0 - vizTransitionProgress);
-         ctx.save();
-         ctx.globalAlpha = vizTransitionProgress;
-         renderVizMode(ctx, nextVizIndex, W, H, freq, wave, bass, mid, high, frame, 1.0);
-         ctx.restore();
-      } else {
-         renderVizMode(ctx, currentVizIndex, W, H, freq, wave, bass, mid, high, frame, 1.0);
-      }
+      renderMultiWave(ctx, W, H, freq, wave, bass, mid, high, frame);
     }
 
-    function renderVizMode(ctx, mode, W, H, freq, wave, bass, mid, high, frame, alphaMult) {
+    function renderMultiWave(ctx, W, H, freq, wave, bass, mid, high, frame) {
        ctx.save();
-       // Base clear for this mode layer
-       if (mode === 0) {
-           ctx.fillStyle = `rgba(0, 0, 0, ${0.3 * alphaMult})`; // Black trail
-       } else {
-           ctx.fillStyle = `rgba(5, 10, 5, ${0.2 * alphaMult})`; // Dark matrix trail
-       }
+       // Base clear with a slight trailing effect
+       ctx.fillStyle = `rgba(5, 5, 5, 0.2)`;
        ctx.fillRect(0, 0, W, H);
 
-       const t = frame * 0.02;
+       const numLines = 5;
+       const sliceWidth = W * 1.0 / wave.length;
+       const t = frame * 0.05;
 
-       switch(mode) {
-         case 0: { // 0: Simple Green on Black
+       // Draw multiple overlapping jagged wave lines
+       for (let l = 0; l < numLines; l++) {
            ctx.beginPath();
-           ctx.strokeStyle = `rgba(0, 255, 0, ${alphaMult})`;
-           ctx.lineWidth = 2 + bass * 2;
-           const sliceWidth = W * 1.0 / wave.length;
+
+           // Calculate color based on the selected hue and vary lightness/saturation per line
+           const lightness = 40 + (l / numLines) * 20;
+           const alpha = 0.4 + (l / numLines) * 0.6;
+           ctx.strokeStyle = `hsla(${currentVizColorHue}, 100%, ${lightness}%, ${alpha})`;
+           ctx.lineWidth = 1.5 + bass * 2 + (l === numLines - 1 ? 1 : 0);
+
            let x = 0;
            for(let i = 0; i < wave.length; i++) {
-               const v = wave[i] / 128.0;
-               const y = v * H / 2 + H / 4;
-               if (i === 0) ctx.moveTo(x, y);
-               else ctx.lineTo(x, y);
-               x += sliceWidth;
-           }
-           ctx.stroke();
-           break;
-         }
-         case 1: { // 1: Circular Tron-like Radar
-           const cx = W / 2;
-           const cy = H / 2;
-           const radius = Math.min(W, H) * 0.3;
-           ctx.beginPath();
-           ctx.strokeStyle = `rgba(0, 255, 100, ${0.8 * alphaMult})`;
-           ctx.lineWidth = 2;
-           for(let i = 0; i < freq.length; i += 2) {
-               const angle = (i / freq.length) * Math.PI * 2 + t;
-               const amp = freq[i] / 255;
-               const r = radius + amp * radius;
-               const x = cx + Math.cos(angle) * r;
-               const y = cy + Math.sin(angle) * r;
-               if (i === 0) ctx.moveTo(x, y);
-               else ctx.lineTo(x, y);
-           }
-           ctx.closePath();
-           ctx.stroke();
-           // Inner pulse
-           ctx.beginPath();
-           ctx.fillStyle = `rgba(0, 255, 50, ${0.2 * bass * alphaMult})`;
-           ctx.arc(cx, cy, radius * (1 + bass * 0.2), 0, Math.PI * 2);
-           ctx.fill();
-           break;
-         }
-         case 2: { // 2: Particle Explosions
-           if (bass > 0.5 && Math.random() > 0.7) {
-             for(let i=0; i<10; i++) {
-               particles.push({
-                 x: W/2 + (Math.random()-0.5)*W*0.5,
-                 y: H/2 + (Math.random()-0.5)*H*0.5,
-                 vx: (Math.random()-0.5)*10,
-                 vy: (Math.random()-0.5)*10,
-                 life: 1.0,
-                 type: 'spark'
-               });
-             }
-           }
-           ctx.fillStyle = `rgba(50, 255, 100, ${alphaMult})`;
-           for (let i = particles.length - 1; i >= 0; i--) {
-               const p = particles[i];
-               if (p.type !== 'spark') continue;
-               p.x += p.vx * (1 + high);
-               p.y += p.vy * (1 + high);
-               p.life -= 0.02;
-               if (p.life <= 0 || p.x < 0 || p.x > W || p.y < 0 || p.y > H) {
-                   particles.splice(i, 1);
+               // Base audio wave value (-1 to 1 roughly)
+               let v = (wave[i] / 128.0) - 1.0;
+
+               // Add a pseudo-random phase offset for each line to make them distinct but related
+               const phaseOffset = Math.sin(i * 0.05 + t + l * Math.PI / 2) * 0.5 * mid;
+
+               // Introduce jaggedness for higher lines
+               const jagged = l > 1 ? (Math.random() - 0.5) * high * 5 : 0;
+
+               const y = H / 2 + (v * H * 0.3) + (phaseOffset * H * 0.1) + jagged + (l - numLines/2) * 10;
+
+               if (i === 0) {
+                   ctx.moveTo(x, y);
                } else {
-                   ctx.globalAlpha = p.life * alphaMult;
-                   ctx.beginPath();
-                   ctx.arc(p.x, p.y, 2 + bass * 3, 0, Math.PI*2);
-                   ctx.fill();
+                   // Step-like jagged line effect inspired by the screenshot
+                   if (l > 2 && i % 3 === 0) {
+                       ctx.lineTo(x, y);
+                   } else if (l <= 2) {
+                       ctx.lineTo(x, y);
+                   }
                }
-           }
-           ctx.globalAlpha = 1.0;
-           break;
-         }
-         case 3: { // 3: Cypherfunk Bars
-           const numBars = 64;
-           const barWidth = W / numBars;
-           for(let i = 0; i < numBars; i++) {
-               const fIdx = Math.floor(i * freq.length / numBars);
-               const amp = freq[fIdx] / 255;
-               const h = amp * H * 0.8;
-               ctx.fillStyle = `rgba(0, ${150 + amp * 105}, 50, ${0.9 * alphaMult})`;
-               ctx.fillRect(i * barWidth, H - h, barWidth - 1, h);
-               // Glitch top cap
-               if (Math.random() > 0.95 && amp > 0.3) {
-                   ctx.fillStyle = `rgba(255, 255, 255, ${0.8 * alphaMult})`;
-                   ctx.fillRect(i * barWidth + (Math.random()-0.5)*10, H - h - 10, barWidth, 4);
-               }
-           }
-           break;
-         }
-         case 4: { // 4: Perspective Floor Grid + Jagged Wave (Matrix)
-           const horizon = H * 0.6;
-           const gridLines = 20;
-           ctx.strokeStyle = `rgba(0, 255, 50, ${0.1 + bass * 0.4 * alphaMult})`;
-           ctx.lineWidth = 1 + bass * 2;
-           ctx.beginPath();
-           for (let i = 0; i <= gridLines; i++) {
-             const xOffset = (i - gridLines/2) * W * 0.1;
-             ctx.moveTo(W/2, horizon);
-             ctx.lineTo(W/2 + xOffset * (1 + bass), H);
-           }
-           for (let i = 0; i < 5; i++) {
-             const y = horizon + (H - horizon) * Math.pow((i + (t%1)) / 5, 2);
-             ctx.moveTo(0, y);
-             ctx.lineTo(W, y);
-           }
-           ctx.stroke();
-
-           ctx.translate(0, H * 0.4);
-           const glitch = bass > 0.6 && Math.random() > 0.8 ? (Math.random() - 0.5) * 50 : 0;
-           ctx.beginPath();
-           ctx.strokeStyle = `rgba(50, 255, 100, ${(0.8 + mid) * alphaMult})`;
-           ctx.lineWidth = 2 + bass * 3;
-           const sliceWidth = W * 1.0 / wave.length;
-           let x = 0;
-           for(let i = 0; i < wave.length; i++) {
-               const v = wave[i] / 128.0;
-               const y = (v - 1) * H * 0.2;
-               if (i === 0) ctx.moveTo(x + glitch, y);
-               else ctx.lineTo(x + glitch, y + (Math.random() - 0.5) * high * 20);
                x += sliceWidth;
            }
            ctx.stroke();
-           break;
-         }
-         case 5: { // 5: Twin Sine Ribbons
-           ctx.lineWidth = 2;
-           for (let r = 0; r < 2; r++) {
-               ctx.beginPath();
-               ctx.strokeStyle = r === 0 ? `rgba(0, 255, 100, ${0.8 * alphaMult})` : `rgba(50, 200, 50, ${0.5 * alphaMult})`;
-               const sliceWidth = W * 1.0 / wave.length;
-               let x = 0;
-               for(let i = 0; i < wave.length; i++) {
-                   const v = wave[i] / 128.0;
-                   const offset = r === 0 ? Math.sin(x * 0.01 + t) * 50 * bass : Math.cos(x * 0.01 - t) * 50 * mid;
-                   const y = v * H / 2 + offset;
-                   if (i === 0) ctx.moveTo(x, y);
-                   else ctx.lineTo(x, y);
-                   x += sliceWidth;
-               }
-               ctx.stroke();
-           }
-           break;
-         }
-         case 6: { // 6: Hexagonal Pulse
-           const cx = W / 2;
-           const cy = H / 2;
-           const maxRadius = Math.min(W, H) * 0.4;
-           for (let i = 0; i < 3; i++) {
-               ctx.beginPath();
-               ctx.strokeStyle = `rgba(0, 255, ${50 + i*50}, ${(0.5 - i*0.1) * alphaMult})`;
-               ctx.lineWidth = 2 + bass * (3 - i);
-               const r = maxRadius * (1 - i * 0.2) * (1 + bass * 0.3);
-               for (let s = 0; s <= 6; s++) {
-                   const angle = s * Math.PI / 3 + t * (i % 2 === 0 ? 1 : -1) * 0.5;
-                   const x = cx + Math.cos(angle) * r;
-                   const y = cy + Math.sin(angle) * r;
-                   if (s === 0) ctx.moveTo(x, y);
-                   else ctx.lineTo(x, y);
-               }
-               ctx.stroke();
-           }
-           break;
-         }
-         case 7: { // 7: Concentric Frequency Rings
-           const cx = W / 2;
-           const cy = H / 2;
-           ctx.lineWidth = 1.5;
-           for(let ring = 0; ring < 8; ring++) {
-               const fIdx = Math.floor(ring * freq.length / 8);
-               const amp = freq[fIdx] / 255;
-               ctx.beginPath();
-               ctx.strokeStyle = `rgba(0, ${150 + amp*100}, 50, ${(0.8 - ring*0.05) * alphaMult})`;
-               const r = (ring + 1) * Math.min(W, H) * 0.05 * (1 + amp * 0.5);
-               ctx.arc(cx, cy, r, 0, Math.PI * 2);
-               ctx.stroke();
-               if (amp > 0.5 && ring % 2 === 0) {
-                   ctx.beginPath();
-                   ctx.strokeStyle = `rgba(255, 255, 255, ${0.5 * alphaMult})`;
-                   ctx.arc(cx, cy, r + 2, t, t + Math.PI/2);
-                   ctx.stroke();
-               }
-           }
-           break;
-         }
        }
        ctx.restore();
     }
