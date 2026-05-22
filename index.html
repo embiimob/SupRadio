@@ -1469,7 +1469,7 @@
     const IPFS_TOKEN_PARSER_REGEX = new RegExp(`^${IPFS_TOKEN_PATTERN_REGEX.source}$`, 'i');
     const HASHTAG_TOKEN_PARSER_REGEX = new RegExp(`^${KEYWORD_REGEX.source}$`, 'i');
     const URL_TRAILING_PUNCTUATION_REGEX = /[.,;]+$/;
-    const IPFS_IMAGE_REGEX = /IPFS:([a-zA-Z0-9]{59}|[a-zA-Z0-9]{46})(?:[\\/]+([^\s<>]+\.(png|jpe?g|gif|webp|avif)))?/i;
+    const IPFS_IMAGE_REGEX = /IPFS:([a-zA-Z0-9]{59}|[a-zA-Z0-9]{46})(?:[\\/]+([^\s<>]+\.(png|jpe?g|gif|webp|avif)))/i;
     const STATUS_URL_MAX_LENGTH = 34;
     const MESSAGE_URL_MAX_LENGTH = 34;
     const MESSAGE_BODY_MAX_LENGTH = 4000;
@@ -1671,8 +1671,19 @@
       const direct = messageText.match(IMAGE_URL_REGEX);
       if (direct) return direct[1];
       const ipfsImage = messageText.match(IPFS_IMAGE_REGEX);
-      if (!ipfsImage || !ipfsImage[1] || !ipfsImage[2]) return '';
-      return buildIpfsPathUrl(ipfsImage[1], ipfsImage[2]);
+      if (!ipfsImage || !ipfsImage[1]) return '';
+      // Return cid only first as default, then fallback to filename. This function currently returns a string.
+      // Wait, the UI expects a single URL, but we need it to try both. Since extractImageUrl is used directly as the `imageUrl` property,
+      // and showAlbumArt just sets src=imageUrl, it might be tricky to fallback there unless we return an array or object.
+      // Actually, if we just return the CID (without filename) as the default, it's often more reliable for IPFS directories if they just use the root hash or if the filename isn't strictly necessary.
+      // But let's build a comma separated string and try splitting it in showAlbumArt? No, let's just return the CID without filename first if it exists.
+      // The user requested: "be sure when pulling images from ipfs.io you first try the CID without the filename ... that's the default. if and only if that fails try the filename"
+      // So we will just omit the path for the primary URL and handle the fallback in `showAlbumArt`.
+      const baseUrl = buildIpfsPathUrl(ipfsImage[1], '');
+      if (ipfsImage[2]) {
+        return `${baseUrl}|${buildIpfsPathUrl(ipfsImage[1], ipfsImage[2])}`;
+      }
+      return baseUrl;
     };
     const toTimestamp = (value) => {
       if (!value) return Number.NaN;
@@ -3922,8 +3933,19 @@
         image.className = 'message-card-image';
         image.loading = 'lazy';
         image.alt = cleanDisplayText(card.title || 'Post image');
-        image.src = card.imageUrl;
-        image.addEventListener('error', () => image.remove());
+        const fallbackUrls = card.imageUrl.split('|');
+        let currentUrlIdx = 0;
+        image.src = fallbackUrls[currentUrlIdx];
+        image.addEventListener('error', () => {
+          currentUrlIdx++;
+          if (currentUrlIdx < fallbackUrls.length) {
+            setTimeout(() => {
+              image.src = fallbackUrls[currentUrlIdx];
+            }, 150);
+          } else {
+            image.remove();
+          }
+        });
         if (Array.isArray(card.links) && card.links[0]) {
           const imageLink = document.createElement('a');
           imageLink.href = card.links[0];
@@ -5003,17 +5025,22 @@
       analyserNode.connect(audioCtx.destination);
     }
 
+    let sourceNodeMap = new WeakMap();
+
     function connectAudioToAnalyser() {
       ensureAudioContext();
       try {
         if (audioSourceNode) {
           audioSourceNode.disconnect();
-          audioSourceNode = null;
         }
-        audioSourceNode = audioCtx.createMediaElementSource(dom.audio);
+        if (!sourceNodeMap.has(dom.audio)) {
+          const newNode = audioCtx.createMediaElementSource(dom.audio);
+          sourceNodeMap.set(dom.audio, newNode);
+        }
+        audioSourceNode = sourceNodeMap.get(dom.audio);
         audioSourceNode.connect(analyserNode);
       } catch (e) {
-        // Already connected or element not ready
+        // Element not ready or other error
       }
     }
 
@@ -5024,54 +5051,108 @@
     }
 
     // ── Album Art Display ─────────────────────────────────────────────────
-    function findImageInQueue() {
-      // Search through the entire play queue for any image URL
-      for (const item of playQueue) {
-        if (item.imageUrl) return item.imageUrl;
+    function findImageForEntry(entry) {
+      if (entry.imageUrl) return entry.imageUrl;
+
+      // Try to find an image temporarily for this sound based on how it was found (its keywords)
+      if (entry.keywords && entry.keywords.length > 0) {
+        for (const kw of entry.keywords) {
+          if (streamCardPool && streamCardPool.length > 0) {
+            for (const card of streamCardPool) {
+              if (card.imageUrl && card.keywords && card.keywords.includes(kw)) {
+                return card.imageUrl;
+              }
+            }
+          }
+          for (const item of playQueue) {
+            if (item.imageUrl && item.keywords && item.keywords.includes(kw)) {
+              return item.imageUrl;
+            }
+          }
+        }
       }
-      // Also look down the remaining search thread for images
+
+      // Fallback: look down the remaining search thread/queue
+      const currentIndex = playQueue.findIndex(i => i.url === entry.url);
+      const startIdx = currentIndex >= 0 ? currentIndex : 0;
+      for (let i = startIdx; i < playQueue.length; i++) {
+        if (playQueue[i].imageUrl) return playQueue[i].imageUrl;
+      }
+
       if (streamCardPool && streamCardPool.length > 0) {
         for (const card of streamCardPool) {
           if (card.imageUrl) return card.imageUrl;
         }
       }
+
       return '';
     }
 
+    let globalLoadTimeout = null;
+    let globalAttemptId = 0;
+
     function showAlbumArt(imageUrl) {
       if (!dom.albumArt || !imageUrl) return;
+
+      const urls = imageUrl.split('|');
+      let currentUrlIndex = 0;
+
+      globalAttemptId++;
+      const currentAttemptId = globalAttemptId;
+
       let settled = false;
       const settle = () => { settled = true; };
-      const loadTimeout = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        dom.albumArt.onload = null;
-        dom.albumArt.onerror = null;
-        dom.albumArt.classList.remove('visible');
-        albumArtVisible = false;
-        startVizAnimation();
-      }, ALBUM_ART_LOAD_TIMEOUT_MS);
-      dom.albumArt.src = imageUrl;
-      dom.albumArt.onload = () => {
-        settle();
-        clearTimeout(loadTimeout);
-        dom.albumArt.classList.add('visible');
-        dom.albumArt.classList.remove('fading');
-        albumArtVisible = true;
-        // After hold time, fade out and start visualization
-        if (albumArtDisplayTimer) clearTimeout(albumArtDisplayTimer);
-        albumArtDisplayTimer = setTimeout(() => {
-          fadeOutAlbumArt();
-        }, ALBUM_ART_HOLD_MS);
+      if (globalLoadTimeout) clearTimeout(globalLoadTimeout);
+
+      const attemptLoad = () => {
+        if (currentUrlIndex >= urls.length) {
+          settle();
+          if (globalLoadTimeout) clearTimeout(globalLoadTimeout);
+          dom.albumArt.onload = null;
+          dom.albumArt.onerror = null;
+          dom.albumArt.classList.remove('visible');
+          albumArtVisible = false;
+          startVizAnimation();
+          return;
+        }
+
+        const urlToTry = urls[currentUrlIndex];
+        dom.albumArt.src = urlToTry;
+
+        globalLoadTimeout = setTimeout(() => {
+          if (settled || currentAttemptId !== globalAttemptId) return;
+          // Timeout reached for this URL
+          currentUrlIndex++;
+          attemptLoad();
+        }, ALBUM_ART_LOAD_TIMEOUT_MS);
+
+        dom.albumArt.onload = () => {
+          if (currentAttemptId !== globalAttemptId) return;
+          settle();
+          clearTimeout(globalLoadTimeout);
+          dom.albumArt.classList.add('visible');
+          dom.albumArt.classList.remove('fading');
+          albumArtVisible = true;
+          // After hold time, fade out and start visualization
+          if (albumArtDisplayTimer) clearTimeout(albumArtDisplayTimer);
+          albumArtDisplayTimer = setTimeout(() => {
+            fadeOutAlbumArt();
+          }, ALBUM_ART_HOLD_MS);
+        };
+
+        dom.albumArt.onerror = () => {
+          if (settled || currentAttemptId !== globalAttemptId) return;
+          clearTimeout(globalLoadTimeout);
+          currentUrlIndex++;
+          // Rate limit the fallback slightly to avoid spamming the gateway
+          setTimeout(() => {
+            if (currentAttemptId !== globalAttemptId) return;
+            attemptLoad();
+          }, 150);
+        };
       };
-      dom.albumArt.onerror = () => {
-        settle();
-        clearTimeout(loadTimeout);
-        // Image failed, go straight to viz
-        dom.albumArt.classList.remove('visible');
-        albumArtVisible = false;
-        startVizAnimation();
-      };
+
+      attemptLoad();
     }
 
     function fadeOutAlbumArt() {
@@ -5085,6 +5166,7 @@
     }
 
     function hideAlbumArt() {
+      globalAttemptId++;
       if (!dom.albumArt) return;
       if (albumArtDisplayTimer) { clearTimeout(albumArtDisplayTimer); albumArtDisplayTimer = null; }
       dom.albumArt.classList.remove('visible', 'fading');
@@ -5148,7 +5230,27 @@
       return sum / (end - start) / 255;
     }
 
+    let currentVizIndex = 0;
+    let nextVizIndex = 0;
+    let vizTransitionProgress = 1.0;
+    const NUM_VIZ_MODES = 8;
+    const VIZ_DURATION_FRAMES = 600; // ~10 seconds at 60fps
+    const VIZ_TRANSITION_FRAMES = 120; // 2 seconds blend
+
     function drawViz(canvas, frame) {
+      if (frame % VIZ_DURATION_FRAMES === 0 && frame > 0) {
+        nextVizIndex = (currentVizIndex + 1) % NUM_VIZ_MODES;
+        vizTransitionProgress = 0.0;
+      }
+
+      if (vizTransitionProgress < 1.0) {
+        vizTransitionProgress += 1.0 / VIZ_TRANSITION_FRAMES;
+        if (vizTransitionProgress >= 1.0) {
+          vizTransitionProgress = 1.0;
+          currentVizIndex = nextVizIndex;
+        }
+      }
+
       const ctx = canvas.getContext('2d');
       const W = canvas.width;
       const H = canvas.height;
@@ -5157,125 +5259,218 @@
       const mid = getAvgAmplitude(freq, 10, 80);
       const high = getAvgAmplitude(freq, 80, 200);
 
-      // Matrix-style dark trail background
-      ctx.fillStyle = `rgba(5, 10, 5, 0.2)`;
-      ctx.fillRect(0, 0, W, H);
-
-      const t = frame * 0.02;
-
-      // Draw perspective grid / "floor"
-      ctx.save();
-      ctx.strokeStyle = `rgba(0, 255, 50, ${0.1 + bass * 0.4})`;
-      ctx.lineWidth = 1 + bass * 2;
-      ctx.beginPath();
-
-      const horizonY = H * 0.6;
-      const vanishingPointX = W / 2;
-
-      // Vertical lines extending from vanishing point
-      const numLines = 20;
-      for(let i = -numLines; i <= numLines; i++) {
-          const x0 = vanishingPointX + (i * W) / numLines;
-          const y0 = H;
-
-          ctx.moveTo(vanishingPointX, horizonY);
-          ctx.lineTo(x0, y0);
+      // Render mode
+      if (vizTransitionProgress < 1.0) {
+         renderVizMode(ctx, currentVizIndex, W, H, freq, wave, bass, mid, high, frame, 1.0 - vizTransitionProgress);
+         ctx.save();
+         ctx.globalAlpha = vizTransitionProgress;
+         renderVizMode(ctx, nextVizIndex, W, H, freq, wave, bass, mid, high, frame, 1.0);
+         ctx.restore();
+      } else {
+         renderVizMode(ctx, currentVizIndex, W, H, freq, wave, bass, mid, high, frame, 1.0);
       }
+    }
 
-      // Horizontal lines moving forward
-      const numHoriz = 15;
-      const speed = (frame * 2) % (H / numHoriz);
-      for(let i = 0; i < numHoriz; i++) {
-          // Add bass bounce
-          let yOffset = Math.pow(i / numHoriz, 2) * (H - horizonY);
-          let y = horizonY + yOffset + speed;
-          if (y > H) y -= (H - horizonY); // Wrap around roughly
+    function renderVizMode(ctx, mode, W, H, freq, wave, bass, mid, high, frame, alphaMult) {
+       ctx.save();
+       // Base clear for this mode layer
+       if (mode === 0) {
+           ctx.fillStyle = `rgba(0, 0, 0, ${0.3 * alphaMult})`; // Black trail
+       } else {
+           ctx.fillStyle = `rgba(5, 10, 5, ${0.2 * alphaMult})`; // Dark matrix trail
+       }
+       ctx.fillRect(0, 0, W, H);
 
-          // Add a bump for the bass wave if it crosses this horizontal line
-          let bounceY = y - (bass * (H - y) * 0.1);
+       const t = frame * 0.02;
 
-          ctx.moveTo(0, bounceY);
-          ctx.lineTo(W, bounceY);
-      }
-      ctx.stroke();
-      ctx.restore();
+       switch(mode) {
+         case 0: { // 0: Simple Green on Black
+           ctx.beginPath();
+           ctx.strokeStyle = `rgba(0, 255, 0, ${alphaMult})`;
+           ctx.lineWidth = 2 + bass * 2;
+           const sliceWidth = W * 1.0 / wave.length;
+           let x = 0;
+           for(let i = 0; i < wave.length; i++) {
+               const v = wave[i] / 128.0;
+               const y = v * H / 2 + H / 4;
+               if (i === 0) ctx.moveTo(x, y);
+               else ctx.lineTo(x, y);
+               x += sliceWidth;
+           }
+           ctx.stroke();
+           break;
+         }
+         case 1: { // 1: Circular Tron-like Radar
+           const cx = W / 2;
+           const cy = H / 2;
+           const radius = Math.min(W, H) * 0.3;
+           ctx.beginPath();
+           ctx.strokeStyle = `rgba(0, 255, 100, ${0.8 * alphaMult})`;
+           ctx.lineWidth = 2;
+           for(let i = 0; i < freq.length; i += 2) {
+               const angle = (i / freq.length) * Math.PI * 2 + t;
+               const amp = freq[i] / 255;
+               const r = radius + amp * radius;
+               const x = cx + Math.cos(angle) * r;
+               const y = cy + Math.sin(angle) * r;
+               if (i === 0) ctx.moveTo(x, y);
+               else ctx.lineTo(x, y);
+           }
+           ctx.closePath();
+           ctx.stroke();
+           // Inner pulse
+           ctx.beginPath();
+           ctx.fillStyle = `rgba(0, 255, 50, ${0.2 * bass * alphaMult})`;
+           ctx.arc(cx, cy, radius * (1 + bass * 0.2), 0, Math.PI * 2);
+           ctx.fill();
+           break;
+         }
+         case 2: { // 2: Particle Explosions
+           if (bass > 0.5 && Math.random() > 0.7) {
+             for(let i=0; i<10; i++) {
+               particles.push({
+                 x: W/2 + (Math.random()-0.5)*W*0.5,
+                 y: H/2 + (Math.random()-0.5)*H*0.5,
+                 vx: (Math.random()-0.5)*10,
+                 vy: (Math.random()-0.5)*10,
+                 life: 1.0,
+                 type: 'spark'
+               });
+             }
+           }
+           ctx.fillStyle = `rgba(50, 255, 100, ${alphaMult})`;
+           for (let i = particles.length - 1; i >= 0; i--) {
+               const p = particles[i];
+               if (p.type !== 'spark') continue;
+               p.x += p.vx * (1 + high);
+               p.y += p.vy * (1 + high);
+               p.life -= 0.02;
+               if (p.life <= 0 || p.x < 0 || p.x > W || p.y < 0 || p.y > H) {
+                   particles.splice(i, 1);
+               } else {
+                   ctx.globalAlpha = p.life * alphaMult;
+                   ctx.beginPath();
+                   ctx.arc(p.x, p.y, 2 + bass * 3, 0, Math.PI*2);
+                   ctx.fill();
+               }
+           }
+           ctx.globalAlpha = 1.0;
+           break;
+         }
+         case 3: { // 3: Cypherfunk Bars
+           const numBars = 64;
+           const barWidth = W / numBars;
+           for(let i = 0; i < numBars; i++) {
+               const fIdx = Math.floor(i * freq.length / numBars);
+               const amp = freq[fIdx] / 255;
+               const h = amp * H * 0.8;
+               ctx.fillStyle = `rgba(0, ${150 + amp * 105}, 50, ${0.9 * alphaMult})`;
+               ctx.fillRect(i * barWidth, H - h, barWidth - 1, h);
+               // Glitch top cap
+               if (Math.random() > 0.95 && amp > 0.3) {
+                   ctx.fillStyle = `rgba(255, 255, 255, ${0.8 * alphaMult})`;
+                   ctx.fillRect(i * barWidth + (Math.random()-0.5)*10, H - h - 10, barWidth, 4);
+               }
+           }
+           break;
+         }
+         case 4: { // 4: Perspective Floor Grid + Jagged Wave (Matrix)
+           const horizon = H * 0.6;
+           const gridLines = 20;
+           ctx.strokeStyle = `rgba(0, 255, 50, ${0.1 + bass * 0.4 * alphaMult})`;
+           ctx.lineWidth = 1 + bass * 2;
+           ctx.beginPath();
+           for (let i = 0; i <= gridLines; i++) {
+             const xOffset = (i - gridLines/2) * W * 0.1;
+             ctx.moveTo(W/2, horizon);
+             ctx.lineTo(W/2 + xOffset * (1 + bass), H);
+           }
+           for (let i = 0; i < 5; i++) {
+             const y = horizon + (H - horizon) * Math.pow((i + (t%1)) / 5, 2);
+             ctx.moveTo(0, y);
+             ctx.lineTo(W, y);
+           }
+           ctx.stroke();
 
-      // Jagged glitchy waveform
-      ctx.save();
-      const glitchChance = high > 0.6 ? Math.random() : 0;
-      const isGlitching = glitchChance > 0.8;
-
-      ctx.strokeStyle = isGlitching ? '#fff' : `rgba(0, 255, 100, ${0.8 + bass * 0.2})`;
-      ctx.lineWidth = 2 + bass * 4;
-      ctx.shadowBlur = 10 + bass * 20;
-      ctx.shadowColor = ctx.strokeStyle;
-
-      ctx.beginPath();
-      const sliceW = W / wave.length;
-      let started = false;
-
-      for (let i = 0; i < wave.length; i++) {
-        const v = (wave[i] - 128) / 128;
-        const amp = 0.4 + mid * 0.3;
-
-        // Glitch offset
-        let xOffset = 0;
-        let yOffset = 0;
-        if (isGlitching && Math.random() > 0.9) {
-            xOffset = (Math.random() - 0.5) * W * 0.05;
-            yOffset = (Math.random() - 0.5) * H * 0.1;
-        }
-
-        const x = i * sliceW + xOffset;
-        const y = horizonY - 50 + v * H * amp + yOffset;
-
-        if (!started) {
-            ctx.moveTo(x, y);
-            started = true;
-        } else {
-            // Draw sharp jagged lines instead of smooth curves for the digital feel
-            ctx.lineTo(x, y);
-        }
-      }
-      ctx.stroke();
-
-      // Occasionally draw random horizontal lines (artifacts)
-      if (high > 0.4 && Math.random() > 0.5) {
-          ctx.fillStyle = `rgba(255, 255, 255, ${Math.random() * 0.5})`;
-          const artifactY = Math.random() * horizonY;
-          const artifactH = Math.random() * 4 + 1;
-          const artifactW = Math.random() * W * 0.2;
-          const artifactX = Math.random() * W;
-          ctx.fillRect(artifactX, artifactY, artifactW, artifactH);
-      }
-
-      ctx.restore();
-
-      // Floating digital particles (data rain effect)
-      if (Math.random() < 0.5) {
-          particles.push({
-              x: Math.random() * W,
-              y: Math.random() * horizonY, // Spawn in sky
-              vy: Math.random() * 5 + 2,
-              life: 1.0,
-              char: Math.random() > 0.5 ? '0' : '1',
-              size: Math.random() * 10 + 10
-          });
-      }
-
-      ctx.font = '14px monospace';
-      for (let i = particles.length - 1; i >= 0; i--) {
-          const p = particles[i];
-          p.y += p.vy * (1 + bass);
-          p.life -= 0.01;
-
-          if (p.life <= 0 || p.y > H) {
-              particles.splice(i, 1);
-          } else {
-              ctx.fillStyle = `rgba(0, ${150 + p.life * 100}, 50, ${p.life})`;
-              ctx.fillText(p.char, p.x, p.y);
-          }
-      }
+           ctx.translate(0, H * 0.4);
+           const glitch = bass > 0.6 && Math.random() > 0.8 ? (Math.random() - 0.5) * 50 : 0;
+           ctx.beginPath();
+           ctx.strokeStyle = `rgba(50, 255, 100, ${(0.8 + mid) * alphaMult})`;
+           ctx.lineWidth = 2 + bass * 3;
+           const sliceWidth = W * 1.0 / wave.length;
+           let x = 0;
+           for(let i = 0; i < wave.length; i++) {
+               const v = wave[i] / 128.0;
+               const y = (v - 1) * H * 0.2;
+               if (i === 0) ctx.moveTo(x + glitch, y);
+               else ctx.lineTo(x + glitch, y + (Math.random() - 0.5) * high * 20);
+               x += sliceWidth;
+           }
+           ctx.stroke();
+           break;
+         }
+         case 5: { // 5: Twin Sine Ribbons
+           ctx.lineWidth = 2;
+           for (let r = 0; r < 2; r++) {
+               ctx.beginPath();
+               ctx.strokeStyle = r === 0 ? `rgba(0, 255, 100, ${0.8 * alphaMult})` : `rgba(50, 200, 50, ${0.5 * alphaMult})`;
+               const sliceWidth = W * 1.0 / wave.length;
+               let x = 0;
+               for(let i = 0; i < wave.length; i++) {
+                   const v = wave[i] / 128.0;
+                   const offset = r === 0 ? Math.sin(x * 0.01 + t) * 50 * bass : Math.cos(x * 0.01 - t) * 50 * mid;
+                   const y = v * H / 2 + offset;
+                   if (i === 0) ctx.moveTo(x, y);
+                   else ctx.lineTo(x, y);
+                   x += sliceWidth;
+               }
+               ctx.stroke();
+           }
+           break;
+         }
+         case 6: { // 6: Hexagonal Pulse
+           const cx = W / 2;
+           const cy = H / 2;
+           const maxRadius = Math.min(W, H) * 0.4;
+           for (let i = 0; i < 3; i++) {
+               ctx.beginPath();
+               ctx.strokeStyle = `rgba(0, 255, ${50 + i*50}, ${(0.5 - i*0.1) * alphaMult})`;
+               ctx.lineWidth = 2 + bass * (3 - i);
+               const r = maxRadius * (1 - i * 0.2) * (1 + bass * 0.3);
+               for (let s = 0; s <= 6; s++) {
+                   const angle = s * Math.PI / 3 + t * (i % 2 === 0 ? 1 : -1) * 0.5;
+                   const x = cx + Math.cos(angle) * r;
+                   const y = cy + Math.sin(angle) * r;
+                   if (s === 0) ctx.moveTo(x, y);
+                   else ctx.lineTo(x, y);
+               }
+               ctx.stroke();
+           }
+           break;
+         }
+         case 7: { // 7: Concentric Frequency Rings
+           const cx = W / 2;
+           const cy = H / 2;
+           ctx.lineWidth = 1.5;
+           for(let ring = 0; ring < 8; ring++) {
+               const fIdx = Math.floor(ring * freq.length / 8);
+               const amp = freq[fIdx] / 255;
+               ctx.beginPath();
+               ctx.strokeStyle = `rgba(0, ${150 + amp*100}, 50, ${(0.8 - ring*0.05) * alphaMult})`;
+               const r = (ring + 1) * Math.min(W, H) * 0.05 * (1 + amp * 0.5);
+               ctx.arc(cx, cy, r, 0, Math.PI * 2);
+               ctx.stroke();
+               if (amp > 0.5 && ring % 2 === 0) {
+                   ctx.beginPath();
+                   ctx.strokeStyle = `rgba(255, 255, 255, ${0.5 * alphaMult})`;
+                   ctx.arc(cx, cy, r + 2, t, t + Math.PI/2);
+                   ctx.stroke();
+               }
+           }
+           break;
+         }
+       }
+       ctx.restore();
     }
 
     // ── Update album art when entry changes ────────────────────────────────
@@ -5284,7 +5479,7 @@
       stopVizAnimation();
       particles = [];
       // Prefer image from the current entry, then search queue fallback
-      const imageUrl = entry.imageUrl || findImageInQueue();
+      const imageUrl = findImageForEntry(entry);
       if (imageUrl) {
         showAlbumArt(imageUrl);
       } else {
