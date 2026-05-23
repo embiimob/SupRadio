@@ -1406,6 +1406,9 @@
     const STANDARD_SEARCH_QTY = 200;
     const TRENDING_SEARCH_QTY = 200;
     const TRENDING_KEYWORD_FETCH_TIMEOUT_MS = 12000;
+    const P2FK_FETCH_TIMEOUT_MS = 15000;
+    const P2FK_FETCH_RETRY_ATTEMPTS = 2;
+    const SEARCH_RECOVERY_RETRY_QTY = 120;
     const TRENDING_KEYWORD_FETCH_CONCURRENCY = 4;
     const PRELOAD_COUNT = 5;
     const TICKER_SCROLL_SPEED_PX_PER_SECOND = 44;
@@ -1526,6 +1529,34 @@
     let composeProfileAvatarCandidateIndex = 0;
 
     const normalize = (value) => (typeof value === 'string' ? value.trim() : '');
+    const delay = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+    async function fetchWithTimeout(endpoint, {
+      timeoutMs = P2FK_FETCH_TIMEOUT_MS,
+      attempts = P2FK_FETCH_RETRY_ATTEMPTS,
+      responseType = 'json',
+      ...fetchOptions
+    } = {}) {
+      let lastError = null;
+      for (let attempt = 1; attempt <= attempts; attempt += 1) {
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          const response = await fetch(endpoint, { ...fetchOptions, signal: controller.signal });
+          if (!response.ok) throw new Error(`request failed (${response.status})`);
+          if (responseType === 'text') return response.text();
+          return response.json();
+        } catch (error) {
+          lastError = error?.name === 'AbortError'
+            ? new Error(`request timeout (${timeoutMs}ms)`)
+            : error;
+          if (attempt >= attempts) throw lastError;
+          await delay(Math.min(350 * attempt, 900));
+        } finally {
+          window.clearTimeout(timeoutId);
+        }
+      }
+      throw lastError || new Error('request failed');
+    }
     const decodeHtmlEntities = (text) => {
       if (typeof text !== 'string') return '';
       return text
@@ -4251,46 +4282,30 @@
 
     async function getPublicAddressByKeyword(keyword) {
       const endpoint = `${P2FK_BASE_URL}/GetPublicAddressByKeyword/${encodeURIComponent(keyword)}?mainnet=${USE_P2FK_MAINNET}`;
-      const response = await fetch(endpoint);
-      if (!response.ok) throw new Error(`address lookup failed (${response.status})`);
-      const payload = normalize(await response.text()).replace(/^"|"$/g, '');
+      const payload = normalize(await fetchWithTimeout(endpoint, { responseType: 'text' })).replace(/^"|"$/g, '');
       if (!payload) throw new Error('keyword address not found');
       return payload;
     }
 
-    async function getPublicMessagesByAddress(address, skip = 0, qty = 200) {
+    async function getPublicMessagesByAddress(address, skip = 0, qty = 200, timeoutMs = P2FK_FETCH_TIMEOUT_MS) {
       const endpoint = `${P2FK_BASE_URL}/GetPublicMessagesByAddress/${encodeURIComponent(address)}?skip=${skip}&qty=${qty}&mainnet=${USE_P2FK_MAINNET}`;
-      const response = await fetch(endpoint);
-      if (!response.ok) throw new Error(`message lookup failed (${response.status})`);
-      const payload = await response.json();
+      const payload = await fetchWithTimeout(endpoint, { timeoutMs });
       return asArray(payload);
     }
 
-    async function getKnownRootsBySearchString(searchString, skip = 0, qty = 200) {
+    async function getKnownRootsBySearchString(searchString, skip = 0, qty = 200, timeoutMs = P2FK_FETCH_TIMEOUT_MS) {
       const endpoint = `${P2FK_BASE_URL}/GetKnownRootsBySearchString?searchString=${encodeURIComponent(searchString)}&skip=${skip}&qty=${qty}&mainnet=${USE_P2FK_MAINNET}&showSystemFiles=false`;
-      const response = await fetch(endpoint);
-      if (!response.ok) throw new Error(`search lookup failed (${response.status})`);
-      const payload = await response.json();
+      const payload = await fetchWithTimeout(endpoint, { timeoutMs });
       return asArray(payload);
     }
 
     async function getKnownRootsBySearchStringWithTimeout(searchString, skip = 0, qty = 200, timeoutMs = TRENDING_KEYWORD_FETCH_TIMEOUT_MS) {
-      let timeoutId = null;
-      try {
-        return await Promise.race([
-          getKnownRootsBySearchString(searchString, skip, qty),
-          new Promise((_, reject) => {
-            timeoutId = setTimeout(() => reject(new Error(`search lookup timeout (${timeoutMs}ms)`)), timeoutMs);
-          })
-        ]);
-      } finally {
-        if (timeoutId) clearTimeout(timeoutId);
-      }
+      return getKnownRootsBySearchString(searchString, skip, qty, timeoutMs);
     }
 
-    async function getKeywordChannelMessages(keyword) {
+    async function getKeywordChannelMessages(keyword, timeoutMs = P2FK_FETCH_TIMEOUT_MS) {
       const address = await getPublicAddressByKeyword(keyword);
-      return getPublicMessagesByAddress(address, 0, 200);
+      return getPublicMessagesByAddress(address, 0, 200, timeoutMs);
     }
 
     async function fetchTrendingKeywordMessages(keyword) {
@@ -4304,10 +4319,10 @@
       return mergeUniqueMessagesByTxid(channelRaw, searchRaw);
     }
 
-    async function queryP2FK(keyword) {
+    async function queryP2FK(keyword, { maxSearchQty = STANDARD_SEARCH_QTY, timeoutMs = P2FK_FETCH_TIMEOUT_MS } = {}) {
       const [keywordChannelResult, mainSearchResult] = await Promise.allSettled([
-        getKeywordChannelMessages(keyword),
-        getKnownRootsSearchWindow(keyword, STANDARD_SEARCH_QTY)
+        getKeywordChannelMessages(keyword, timeoutMs),
+        getKnownRootsSearchWindow(keyword, maxSearchQty, timeoutMs)
       ]);
       const keywordMessages = keywordChannelResult.status === 'fulfilled' ? keywordChannelResult.value : [];
       const mainSearchMessages = mainSearchResult.status === 'fulfilled' ? mainSearchResult.value : [];
@@ -4318,6 +4333,18 @@
         throw new Error('no playable audio files in keyword or search results');
       }
       return { items, messages, addressLabels };
+    }
+
+    async function queryP2FKWithRecovery(keyword) {
+      try {
+        return await queryP2FK(keyword);
+      } catch (firstError) {
+        console.warn('Primary keyword search failed; retrying with reduced search window', firstError);
+        return queryP2FK(keyword, {
+          maxSearchQty: SEARCH_RECOVERY_RETRY_QTY,
+          timeoutMs: TRENDING_KEYWORD_FETCH_TIMEOUT_MS
+        });
+      }
     }
 
     function extractSearchString(entry) {
@@ -4380,14 +4407,14 @@
     }
 
 
-    async function getKnownRootsSearchWindow(searchString, maxSearchQty = STANDARD_SEARCH_QTY) {
+    async function getKnownRootsSearchWindow(searchString, maxSearchQty = STANDARD_SEARCH_QTY, timeoutMs = P2FK_FETCH_TIMEOUT_MS) {
       const STANDARD_SEARCH_PAGE_SIZE = 25;
       const messages = [];
       let skip = 0;
       while (skip < maxSearchQty) {
         const remaining = maxSearchQty - skip;
         const qty = Math.min(STANDARD_SEARCH_PAGE_SIZE, remaining);
-        const page = await getKnownRootsBySearchString(searchString, skip, qty);
+        const page = await getKnownRootsBySearchString(searchString, skip, qty, timeoutMs);
         const pageRows = asArray(page);
         if (!pageRows.length) break;
         messages.push(...pageRows);
@@ -4811,7 +4838,7 @@
       try {
         const result = isTrendingDefault
           ? await queryTrendingP2FK()
-          : await queryP2FK(cleanedInput);
+          : await queryP2FKWithRecovery(cleanedInput);
         if (requestId !== loadSearchRequestId) return;
         if (isTrendingDefault && result?.displayKeyword) {
           displayKeyword = result.displayKeyword;
@@ -5061,7 +5088,6 @@
     }
 
     function connectAudioToAnalyser() {
-      if (isIOS()) return;
       ensureAudioContext();
       try {
         if (audioSourceNode) {
@@ -5222,11 +5248,14 @@
       const canvas = dom.visualizerCanvas;
       if (!canvas) return;
       resizeCanvas();
-      pickNewVizColor();
+      pickNewVizStyle();
       let frame = Math.floor(Math.random() * 10000);
-      function tick() {
+      function tick(now = performance.now()) {
         vizAnimFrameId = requestAnimationFrame(tick);
-        frame++;
+        frame += 0.55;
+        if (now >= vizNextSwitchAtMs) {
+          pickNewVizStyle();
+        }
         drawViz(canvas, frame);
       }
       tick();
@@ -5250,7 +5279,7 @@
 
     // ── Main visualization renderer ───────────────────────────────────────
     function getAudioData() {
-      if (!analyserNode || isIOS()) {
+      if (!analyserNode) {
         const bufLen = 512;
         const wave = new Uint8Array(bufLen);
         const freq = new Uint8Array(bufLen);
@@ -5277,15 +5306,60 @@
       return sum / (end - start) / 255;
     }
 
+    const VIZ_MODES = ['multiwave', 'vortex', 'platonic'];
+    let currentVizMode = VIZ_MODES[0];
     let currentVizColorHue = 120; // Default green
     let currentVizNumLines = 5;
+    let vortexRingDensity = 0;
+    let currentVortexPalette = [40, 180, 280, 320];
+    let vizNextSwitchAtMs = 0;
+    // Platonic beat-envelope state
+    let platonicBeatEnvelope = 0;
+    let platonicPrevBass = 0;
+    let platonicMorphLevel = 0;
 
-    function pickNewVizColor() {
+    function getRandomVizDurationMs() {
+      return (30 + Math.random() * 30) * 1000;
+    }
+
+    function createVortexPalette() {
+      const baseHue = Math.floor(Math.random() * 360);
+      const offsetA = 40 + Math.random() * 40;
+      const offsetB = 120 + Math.random() * 40;
+      const offsetC = 210 + Math.random() * 50;
+      return [
+        baseHue % 360,
+        (baseHue + offsetA) % 360,
+        (baseHue + offsetB) % 360,
+        (baseHue + offsetC) % 360
+      ];
+    }
+
+    function pickNewVizStyle() {
        // Randomly pick a hue: Green (120), Cyan (180), Blue (210), Purple (270), Magenta (300), Red (0), Orange (30), Yellow (60)
        const hues = [0, 30, 60, 120, 180, 210, 270, 300];
        currentVizColorHue = hues[Math.floor(Math.random() * hues.length)];
-       // Randomly pick number of lines between 3 and 8
-       currentVizNumLines = Math.floor(Math.random() * (8 - 3 + 1)) + 3;
+       // Randomly pick number of lines between 2 and 3
+       currentVizNumLines = Math.floor(Math.random() * 2) + 2;
+       if (VIZ_MODES.length === 1) {
+         currentVizMode = VIZ_MODES[0];
+       } else {
+         const avoidImmediateRepeat = vizNextSwitchAtMs > 0;
+         let nextMode = VIZ_MODES[Math.floor(Math.random() * VIZ_MODES.length)];
+         while (avoidImmediateRepeat && nextMode === currentVizMode) {
+           nextMode = VIZ_MODES[Math.floor(Math.random() * VIZ_MODES.length)];
+         }
+         currentVizMode = nextMode;
+       }
+       if (currentVizMode === 'vortex') {
+         currentVortexPalette = createVortexPalette();
+       }
+       if (currentVizMode === 'platonic') {
+         platonicBeatEnvelope = 0;
+         platonicPrevBass = 0;
+         platonicMorphLevel = 0;
+       }
+       vizNextSwitchAtMs = performance.now() + getRandomVizDurationMs();
     }
 
     function drawViz(canvas, frame) {
@@ -5297,6 +5371,14 @@
       const mid = getAvgAmplitude(freq, 10, 80);
       const high = getAvgAmplitude(freq, 80, 200);
 
+      if (currentVizMode === 'vortex') {
+        renderVortexWave(ctx, W, H, freq, wave, bass, mid, high, frame);
+        return;
+      }
+      if (currentVizMode === 'platonic') {
+        renderPlatonicWave(ctx, W, H, freq, wave, bass, mid, high, frame);
+        return;
+      }
       renderMultiWave(ctx, W, H, freq, wave, bass, mid, high, frame, currentVizNumLines);
     }
 
@@ -5307,7 +5389,7 @@
        ctx.fillRect(0, 0, W, H);
 
        const sliceWidth = W * 1.0 / wave.length;
-       const t = frame * 0.05;
+       const t = frame * 0.026;
 
        // Draw multiple overlapping jagged wave lines
        for (let l = 0; l < numLines; l++) {
@@ -5317,7 +5399,7 @@
            const lightness = 40 + (l / numLines) * 20;
            const alpha = 0.4 + (l / numLines) * 0.6;
            ctx.strokeStyle = `hsla(${currentVizColorHue}, 100%, ${lightness}%, ${alpha})`;
-           ctx.lineWidth = 1.5 + bass * 2 + (l === numLines - 1 ? 1 : 0);
+           ctx.lineWidth = 0.7 + bass * 1.1 + (l === numLines - 1 ? 0.35 : 0);
 
            let x = 0;
            for(let i = 0; i < wave.length; i++) {
@@ -5330,7 +5412,8 @@
                // Introduce jaggedness for higher lines
                const jagged = l > 1 ? (Math.random() - 0.5) * high * 5 : 0;
 
-               const y = H / 2 + (v * H * 0.3) + (phaseOffset * H * 0.1) + jagged + (l - numLines/2) * 10;
+               const lineStretch = 0.34 + bass * 0.16 + mid * 0.08 + (l === numLines - 1 ? 0.06 : 0);
+               const y = H / 2 + (v * H * lineStretch) + (phaseOffset * H * 0.13) + jagged + (l - numLines/2) * 10;
 
                if (i === 0) {
                    ctx.moveTo(x, y);
@@ -5349,18 +5432,246 @@
        ctx.restore();
     }
 
+    // ── Outward-expanding concentric rings ────────────────────────────────
+    // Starts with few rings and grows to many based on rhythm energy.
+    function renderVortexWave(ctx, W, H, freq, wave, bass, mid, high, frame) {
+      ctx.save();
+
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.18)';
+      ctx.fillRect(0, 0, W, H);
+
+      const cx = W / 2;
+      const cy = H / 2;
+      // Allow rings to travel well past the canvas edge.
+      const maxR = Math.max(W, H) * 1.18;
+
+      // Beat-responsive density target: quiet ~= 5 rings, loud ~= 25 rings.
+      const ringTarget = Math.min(1, bass * 1.05 + mid * 0.55 + high * 0.2);
+      vortexRingDensity += (ringTarget - vortexRingDensity) * 0.12;
+      const ringCount = Math.round(5 + vortexRingDensity * 20);
+
+      // Faster outward drift with stronger rhythm.
+      const driftSpeed = 0.007 + bass * 0.038 + mid * 0.014;
+      const globalRot = frame * (0.009 + high * 0.012);
+
+      for (let r = 0; r < ringCount; r += 1) {
+        const lifeNorm = ((r / ringCount) + frame * driftSpeed) % 1;
+        // Nonlinear expansion keeps wider spacing near the center.
+        const radius = maxR * Math.pow(lifeNorm, 1.27);
+        if (radius <= 1) continue;
+
+        // Palette is fixed for the duration of this viz slot.
+        const hue = currentVortexPalette[r % currentVortexPalette.length];
+        const sat = 72 + (r % 3) * 10;
+        const lightness = 40 + lifeNorm * 24;
+        const alpha = Math.min(1, lifeNorm / 0.06) * (0.74 + bass * 0.2);
+
+        const ringAngle = globalRot + r * 0.85;
+        const SEG = 64;
+        ctx.beginPath();
+        for (let s = 0; s <= SEG; s += 1) {
+          const angle = (s / SEG) * Math.PI * 2 + ringAngle;
+          const wIdx = Math.floor((s / SEG) * (wave.length - 1));
+          const waveV = ((wave[wIdx] || 128) / 128) - 1;
+          const fIdx = Math.floor((s / SEG) * (freq.length - 1));
+          const freqV = (freq[fIdx] || 0) / 255;
+          // Stronger audio displacement for more visible wave depth.
+          const wobbleScale = 1 + waveV * (0.16 + high * 0.08) + freqV * 0.12 + bass * 0.11;
+          const wobbleR = radius * Math.max(0.45, wobbleScale);
+          const px = cx + Math.cos(angle) * wobbleR;
+          const py = cy + Math.sin(angle) * wobbleR;
+          if (s === 0) ctx.moveTo(px, py);
+          else ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        ctx.strokeStyle = `hsla(${hue}, ${sat}%, ${lightness}%, ${Math.min(1, alpha)})`;
+        ctx.lineWidth = 1.2 + bass * 1.35 + high * 0.45;
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    function buildSolid(vertices) {
+      let edgeDistance = Infinity;
+      for (let i = 0; i < vertices.length; i += 1) {
+        for (let j = i + 1; j < vertices.length; j += 1) {
+          const dx = vertices[i][0] - vertices[j][0];
+          const dy = vertices[i][1] - vertices[j][1];
+          const dz = vertices[i][2] - vertices[j][2];
+          const d = Math.hypot(dx, dy, dz);
+          if (d > 0.0001 && d < edgeDistance) edgeDistance = d;
+        }
+      }
+      const tolerance = edgeDistance * 0.14;
+      const edges = [];
+      for (let i = 0; i < vertices.length; i += 1) {
+        for (let j = i + 1; j < vertices.length; j += 1) {
+          const dx = vertices[i][0] - vertices[j][0];
+          const dy = vertices[i][1] - vertices[j][1];
+          const dz = vertices[i][2] - vertices[j][2];
+          const d = Math.hypot(dx, dy, dz);
+          if (Math.abs(d - edgeDistance) <= tolerance) edges.push([i, j]);
+        }
+      }
+      return { vertices, edges };
+    }
+
+    const PHI = (1 + Math.sqrt(5)) / 2;
+    const PLATONIC_SOLIDS = [
+      buildSolid([
+        [1, 1, 1], [1, -1, -1], [-1, 1, -1], [-1, -1, 1]
+      ]),
+      buildSolid([
+        [-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1],
+        [-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]
+      ]),
+      buildSolid([
+        [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]
+      ]),
+      buildSolid([
+        [0, 1, PHI], [0, -1, PHI], [0, 1, -PHI], [0, -1, -PHI],
+        [1, PHI, 0], [-1, PHI, 0], [1, -PHI, 0], [-1, -PHI, 0],
+        [PHI, 0, 1], [PHI, 0, -1], [-PHI, 0, 1], [-PHI, 0, -1]
+      ]),
+      // Dodecahedron (20 vertices)
+      buildSolid([
+        [1, 1, 1], [1, 1, -1], [1, -1, 1], [1, -1, -1],
+        [-1, 1, 1], [-1, 1, -1], [-1, -1, 1], [-1, -1, -1],
+        [0, 1/PHI, PHI], [0, -1/PHI, PHI], [0, 1/PHI, -PHI], [0, -1/PHI, -PHI],
+        [1/PHI, PHI, 0], [-1/PHI, PHI, 0], [1/PHI, -PHI, 0], [-1/PHI, -PHI, 0],
+        [PHI, 0, 1/PHI], [PHI, 0, -1/PHI], [-PHI, 0, 1/PHI], [-PHI, 0, -1/PHI]
+      ])
+    ];
+
+    function morphSolidVertices(a, b, t) {
+      const maxCount = Math.max(a.vertices.length, b.vertices.length);
+      const vertices = [];
+      for (let i = 0; i < maxCount; i += 1) {
+        const av = a.vertices[i % a.vertices.length];
+        const bv = b.vertices[i % b.vertices.length];
+        vertices.push([
+          av[0] + (bv[0] - av[0]) * t,
+          av[1] + (bv[1] - av[1]) * t,
+          av[2] + (bv[2] - av[2]) * t
+        ]);
+      }
+      return vertices;
+    }
+
+    function rotate3d([x, y, z], ax, ay, az) {
+      const sx = Math.sin(ax), cx = Math.cos(ax);
+      const sy = Math.sin(ay), cy = Math.cos(ay);
+      const sz = Math.sin(az), cz = Math.cos(az);
+      let ry = y * cx - z * sx;
+      let rz = y * sx + z * cx;
+      let rx = x * cy + rz * sy;
+      rz = -x * sy + rz * cy;
+      const fx = rx * cz - ry * sz;
+      const fy = rx * sz + ry * cz;
+      return [fx, fy, rz];
+    }
+
+    function project3d([x, y, z], W, H, scale = 1) {
+      const perspective = 3.2;
+      const depth = perspective + z;
+      const zoom = (Math.min(W, H) * 0.76 * scale) / Math.max(depth, 0.8);
+      return [W / 2 + x * zoom, H / 2 + y * zoom];
+    }
+
+    function renderPlatonicWave(ctx, W, H, freq, wave, bass, mid, high, frame) {
+      ctx.save();
+      ctx.fillStyle = `rgba(5, 5, 5, 0.18)`;
+      ctx.fillRect(0, 0, W, H);
+
+      // ── Beat envelope and complexity accumulator ───────────────────────────
+      const beatThreshold = 0.07;
+      const beatAttack = Math.max(0, bass - platonicPrevBass - beatThreshold);
+      if (beatAttack > 0) {
+        platonicBeatEnvelope = Math.min(2.2, platonicBeatEnvelope + beatAttack * 9.5);
+        platonicMorphLevel += beatAttack * 14 + bass * 0.6 + mid * 0.25;
+      }
+      // Beat envelope decays at a moderate rate (beats die within ~1-2 s of silence).
+      platonicBeatEnvelope *= 0.972;
+      // Complexity decays very slowly — faces are lost gradually.
+      platonicMorphLevel *= 0.998;
+      platonicMorphLevel += bass * 0.014 + mid * 0.008;
+      platonicPrevBass = bass;
+
+      const solidCount = PLATONIC_SOLIDS.length; // 5 levels: tetra→cube→octa→icosa→dodeca
+      // solidPhase accumulates without any cap; index wraps so shapes keep cycling.
+      const solidPhase = Math.max(0, platonicMorphLevel * 0.24);
+      const aIdx = Math.floor(solidPhase) % solidCount;
+      const bIdx = (aIdx + 1) % solidCount;
+      const morphT = solidPhase - Math.floor(solidPhase);
+      const solidA = PLATONIC_SOLIDS[aIdx];
+      const solidB = PLATONIC_SOLIDS[bIdx];
+      const morphedVerts = morphSolidVertices(solidA, solidB, morphT);
+      const edgeSet = morphT < 0.5 ? solidA.edges : solidB.edges;
+
+      // Scale: beat envelope briefly puffs the shape out.
+      const expansion = 1.0 + platonicBeatEnvelope * 0.52 + high * 0.12;
+
+      // Mid-reactive vertex wobble produces a "breathing" pulse.
+      const midWobble = mid * 0.3;
+      const vertices = morphedVerts.map((v, i) => {
+        const len = Math.hypot(v[0], v[1], v[2]) || 1;
+        const wobble = midWobble * Math.sin(frame * 0.06 + i * 1.73);
+        return [
+          v[0] + (v[0] / len) * wobble,
+          v[1] + (v[1] / len) * wobble,
+          v[2] + (v[2] / len) * wobble
+        ];
+      });
+
+      // Rotation speeds react to bass and beat.
+      const ax = frame * 0.012 + mid * 0.65 + platonicBeatEnvelope * 0.28;
+      const ay = frame * 0.016 + bass * 1.05 + platonicBeatEnvelope * 0.42;
+      const az = frame * 0.008 + high * 0.38;
+      const projected = vertices.map((v) => project3d(rotate3d(v, ax, ay, az), W, H, expansion));
+
+      // Colour shifts with beat and frequency energy.
+      const hue = (currentVizColorHue + frame * 1.0 + platonicBeatEnvelope * 95 + mid * 70) % 360;
+      const edgeSat = 80 + platonicBeatEnvelope * 20;
+      const edgeLit = 50 + platonicBeatEnvelope * 18 + high * 12;
+      const edgeHue2 = (hue + 42 + high * 55) % 360;
+
+      // Draw edges — single crisp solid, no ghost shells.
+      ctx.beginPath();
+      for (const [i, j] of edgeSet) {
+        const a = projected[i % projected.length];
+        const b = projected[j % projected.length];
+        ctx.moveTo(a[0], a[1]);
+        ctx.lineTo(b[0], b[1]);
+      }
+      ctx.strokeStyle = `hsla(${hue}, ${edgeSat}%, ${edgeLit}%, 0.92)`;
+      ctx.lineWidth = 1.2 + bass * 1.2 + platonicBeatEnvelope * 1.5;
+      ctx.stroke();
+
+      // Draw vertex dots.
+      ctx.beginPath();
+      for (const pt of projected) {
+        ctx.moveTo(pt[0] + 1.5, pt[1]);
+        ctx.arc(pt[0], pt[1], 1.5 + high * 2.0 + platonicBeatEnvelope * 1.4, 0, Math.PI * 2);
+      }
+      ctx.strokeStyle = `hsla(${edgeHue2}, 95%, 72%, ${0.55 + platonicBeatEnvelope * 0.38})`;
+      ctx.lineWidth = 0.9 + platonicBeatEnvelope * 0.55;
+      ctx.stroke();
+
+      ctx.restore();
+    }
+
     // ── Update album art when entry changes ────────────────────────────────
     function onNewAudioEntry(entry) {
       hideAlbumArt();
-      stopVizAnimation();
       particles = [];
       // Prefer image from the current entry, then search queue fallback
       const imageUrl = findImageForEntry(entry);
       if (imageUrl) {
+        stopVizAnimation();
         showAlbumArt(imageUrl);
       } else {
         hideAlbumArt();
-        startVizAnimation();
+        if (!vizAnimFrameId) startVizAnimation();
       }
     }
 
