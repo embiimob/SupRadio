@@ -4,7 +4,7 @@ SupRadio is a local-first, single-file web app (`index.html`) for discovering, p
 
 - p2fk.io: https://p2fk.io
 - SupRadio repository: https://github.com/embiimob/SupRadio
-- Live demo: https://supRadio.io
+- Live demo: https://supRad.io
 
 
 SupRadio is software you run yourself, not a hosted streaming company.
