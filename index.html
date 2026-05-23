@@ -5399,8 +5399,8 @@
         ctx.shadowColor = `hsla(${currentVizColorHue}, 100%, 50%, 0.8)`;
 
         const slice = W / wave.length;
-        // Slow down the scrolling speed of the twist
-        const slowT = t * 0.3;
+        // Make the scrolling speed of the twist even slower
+        const slowT = t * 0.1;
         for (let i = 0; i <= wave.length; i++) {
             const idx = i === wave.length ? 0 : i; // loop logic for smooth endings
             let v = (wave[idx] / 128.0) - 1.0;
@@ -5447,8 +5447,10 @@
             const scale = 5 / z; // The closer, the larger
             if (scale < 0) continue;
 
+            // Dynamic sound-based color shifting
+            const dynamicHue = (currentVizColorHue + bass * 100 + mid * 50 + r * 5) % 360;
             const alpha = Math.min(1, (1 - z / rings) + bass * 0.5);
-            ctx.strokeStyle = `hsla(${currentVizColorHue}, 100%, ${60 - z*3}%, ${alpha})`;
+            ctx.strokeStyle = `hsla(${dynamicHue}, 100%, ${60 - z*3}%, ${alpha})`;
             ctx.lineWidth = Math.min(3, 0.5 * scale + bass * 1); // Capped thickness
 
             for (let i = 0; i <= segments; i++) {
@@ -5476,11 +5478,25 @@
     }
 
 
+    // State to handle dynamic morphing of 3D shapes
+    let dynamicSides = 3;
+    let dynamicLayers = 3;
+    let lastBeatFrame = 0;
+
     // Mode 3: 3D Wireframe Shapes
     // Slow rotating 3D platonic-like objects that distort based on sound
     function renderSpinningShapes(ctx, W, H, cx, cy, wave, bass, mid, high, frame) {
         ctx.shadowBlur = 15;
         const slowT = frame * 0.005; // Slow rotation
+
+        // Beat detection logic for dynamic morphing
+        if (bass > 0.8 && frame - lastBeatFrame > 60) {
+            // Trigger a shape morph on heavy bass hits with a small cooldown
+            const possibleSides = [3, 4, 5, 6, 8, 12, 20]; // Platonic solid vibe cross-sections
+            dynamicSides = possibleSides[Math.floor(Math.random() * possibleSides.length)];
+            dynamicLayers = Math.floor(Math.random() * 3) + 2; // 2, 3, or 4 layers
+            lastBeatFrame = frame;
+        }
 
         // A function to project 3D points to 2D
         function project3D(x, y, z) {
@@ -5523,12 +5539,21 @@
             // Generate vertices for a generic 3D shape (like a prism or icosphere approximation)
             // We'll generate a cylinder-like 3D wireframe that spins
             const points = [];
-            const sides = 3 + (s * 4); // 3, 7, 11, 15
-            const layers = 3;
+            // Base sides dynamically updated by beat plus an offset for inner/outer shells
+            const sides = dynamicSides + (s * 2);
+            const layers = dynamicLayers;
 
-            for (let l = -1; l <= 1; l++) {
+            // Distribute layers from top to bottom
+            const layerOffsets = [];
+            for (let l = 0; l < layers; l++) {
+                // Normalize layer pos from -1 to 1
+                let norm = layers > 1 ? (l / (layers - 1)) * 2 - 1 : 0;
+                layerOffsets.push(norm);
+            }
+
+            for (let l = 0; l < layers; l++) {
                 // Modulate layer height by audio
-                const heightOffset = l * (r * 0.8) * (1 + high);
+                const heightOffset = layerOffsets[l] * (r * 0.8) * (1 + high);
                 for (let i = 0; i < sides; i++) {
                     const angle = (i / sides) * Math.PI * 2;
                     // Introduce audio noise into vertex positions
