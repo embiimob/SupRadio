@@ -5308,9 +5308,11 @@
     let currentVizMode = VIZ_MODES[0];
     let currentVizColorHue = 120; // Default green
     let currentVizNumLines = 5;
+    let vortexRingDensity = 0;
     // Platonic beat-envelope state
     let platonicBeatEnvelope = 0;
     let platonicPrevBass = 0;
+    let platonicMorphLevel = 0;
 
     function pickNewVizStyle() {
        // Randomly pick a hue: Green (120), Cyan (180), Blue (210), Purple (270), Magenta (300), Red (0), Orange (30), Yellow (60)
@@ -5372,7 +5374,8 @@
                // Introduce jaggedness for higher lines
                const jagged = l > 1 ? (Math.random() - 0.5) * high * 5 : 0;
 
-               const y = H / 2 + (v * H * 0.3) + (phaseOffset * H * 0.1) + jagged + (l - numLines/2) * 10;
+               const lineStretch = 0.34 + bass * 0.16 + mid * 0.08 + (l === numLines - 1 ? 0.06 : 0);
+               const y = H / 2 + (v * H * lineStretch) + (phaseOffset * H * 0.13) + jagged + (l - numLines/2) * 10;
 
                if (i === 0) {
                    ctx.moveTo(x, y);
@@ -5413,8 +5416,12 @@
       ctx.fillStyle = vignette;
       ctx.fillRect(0, 0, W, H);
 
-      // Fewer rings → more visible space between them
-      const RING_COUNT = 20;
+      // Dynamic ring density: strong rhythm fills in more rings, calmer rhythm stays sparse.
+      const MAX_RING_COUNT = 20;
+      const MIN_RING_COUNT = 7;
+      const ringTarget = Math.min(1, bass * 1.15 + mid * 0.45);
+      vortexRingDensity += (ringTarget - vortexRingDensity) * 0.14;
+      const ringCount = Math.round(MIN_RING_COUNT + (MAX_RING_COUNT - MIN_RING_COUNT) * vortexRingDensity);
       // Global rotation speed (slow drift)
       const globalRot = frame * 0.014;
       // How much each successive ring is angularly offset (creates the spiral look)
@@ -5424,9 +5431,9 @@
       // Audio-reactive tunnel breath
       const breathe = 1 + bass * 0.28 + mid * 0.09;
 
-      for (let r = 0; r < RING_COUNT; r += 1) {
+      for (let r = 0; r < ringCount; r += 1) {
         // Each ring has a position that drifts outward over time (flying through effect)
-        const rawNorm = ((r + frame * RUSH_SPEED) % RING_COUNT) / RING_COUNT;
+        const rawNorm = ((r + frame * RUSH_SPEED) % ringCount) / ringCount;
         // Non-linear: rings accelerate as they reach the edge (perspective foreshortening)
         const norm = rawNorm * rawNorm * (3 - 2 * rawNorm); // smooth-step
         const radius = norm * maxR * breathe;
@@ -5558,24 +5565,31 @@
       // ── Beat envelope: spike on bass attack, decay between beats ──────────
       const beatThreshold = 0.07;
       if (bass > platonicPrevBass + beatThreshold) {
-        platonicBeatEnvelope = Math.min(1, platonicBeatEnvelope + (bass - platonicPrevBass) * 5);
+        platonicBeatEnvelope = Math.min(1.4, platonicBeatEnvelope + (bass - platonicPrevBass) * 6.2);
       }
-      platonicBeatEnvelope *= 0.93; // exponential decay toward silence
+      platonicBeatEnvelope *= 0.95; // exponential decay toward silence
       platonicPrevBass = bass;
 
       const levelMax = PLATONIC_SOLIDS.length - 1;
-      const cycle = (frame * 0.004) % (levelMax * 2);
-      const reflected = cycle <= levelMax ? cycle : (levelMax * 2) - cycle;
-      const aIdx = Math.floor(reflected);
+      const beatDrive = Math.min(1, platonicBeatEnvelope * 0.78 + bass * 0.28 + mid * 0.22 + high * 0.12);
+      const targetMorphLevel = beatDrive * levelMax;
+      if (platonicMorphLevel < targetMorphLevel) {
+        platonicMorphLevel += (targetMorphLevel - platonicMorphLevel) * (0.24 + bass * 0.16);
+      } else {
+        // Natural falloff between beats; quick beats keep complexity elevated.
+        platonicMorphLevel += (targetMorphLevel - platonicMorphLevel) * 0.05;
+      }
+      const clampedMorphLevel = Math.max(0, Math.min(levelMax, platonicMorphLevel));
+      const aIdx = Math.floor(clampedMorphLevel);
       const bIdx = Math.min(levelMax, aIdx + 1);
-      const morphT = reflected - aIdx;
+      const morphT = clampedMorphLevel - aIdx;
       const solidA = PLATONIC_SOLIDS[aIdx];
       const solidB = PLATONIC_SOLIDS[bIdx];
       const baseMorphedVerts = morphSolidVertices(solidA, solidB, morphT);
       const edgeSet = morphT < 0.5 ? solidA.edges : solidB.edges;
 
       // Beat grows the shape; silence collapses it back
-      const expansion = 1 + platonicBeatEnvelope * 0.85 + Math.sin(frame * 0.02) * 0.1 + high * 0.12;
+      const expansion = 1 + platonicBeatEnvelope * 0.78 + beatDrive * 0.2 + high * 0.1;
 
       // Mid-reactive vertex wobble: pushes vertices radially outward, creating a "pulse" on each face
       const midWobble = mid * 0.38;
