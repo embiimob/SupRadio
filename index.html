@@ -5374,7 +5374,7 @@
         } else if (mode === 1) {
             renderHolographicCylinder(ctx, W, H, cx, cy, wave, bass, mid, high, t);
         } else {
-            renderSymmetricalMirror(ctx, W, H, cx, cy, wave, bass, mid, high, t);
+            renderSpinningShapes(ctx, W, H, cx, cy, wave, bass, mid, high, frame);
         }
 
         ctx.restore();
@@ -5392,7 +5392,7 @@
         grad.addColorStop(1, `hsla(${(currentVizColorHue + 60) % 360}, 100%, 30%, 0.6)`);
 
         ctx.strokeStyle = grad;
-        ctx.shadowBlur = 20 + bass * 30;
+        ctx.shadowBlur = 10 + bass * 10;
         ctx.shadowColor = `hsla(${currentVizColorHue}, 100%, 50%, 0.8)`;
 
         const slice = W / wave.length;
@@ -5408,8 +5408,8 @@
             const x = i * slice;
             const y = cy + yOffset;
 
-            // Dynamic width based on wave amplitude and bass
-            const localWidth = 2 + Math.abs(v) * 10 + bass * 15;
+            // Fixed, thin line width to prevent crunching
+            const localWidth = 1.5 + bass * 2;
 
             if (i === 0) {
                 ctx.lineWidth = localWidth;
@@ -5440,7 +5440,7 @@
 
             const alpha = Math.min(1, (1 - z / rings) + bass * 0.5);
             ctx.strokeStyle = `hsla(${currentVizColorHue}, 100%, ${60 - z*3}%, ${alpha})`;
-            ctx.lineWidth = 1 * scale + bass * 2;
+            ctx.lineWidth = Math.min(3, 0.5 * scale + bass * 1); // Capped thickness
 
             for (let i = 0; i <= segments; i++) {
                 const idx = i === segments ? 0 : i;
@@ -5466,65 +5466,76 @@
         }
     }
 
-    // Mode 3: The Symmetrical Mirror-Line
-    // Two razor-thin lines perfectly mirrored across the Y-axis. Responds violently to bass with chromatic aberration.
-    function renderSymmetricalMirror(ctx, W, H, cx, cy, wave, bass, mid, high, t) {
-        const slice = W / wave.length;
 
-        // Chromatic aberration offsets on heavy bass
-        const glitchOffset = bass > 0.4 ? (Math.random() - 0.5) * bass * 20 : 0;
-        const colorOffset1 = glitchOffset > 0 ? 15 : 0;
-        const colorOffset2 = glitchOffset < 0 ? -15 : 0;
+    // Mode 3: Spinning Polygons
+    // Concentric spinning geometric shapes reacting dynamically to audio.
+    function renderSpinningShapes(ctx, W, H, cx, cy, wave, bass, mid, high, frame) {
+        ctx.shadowBlur = 15;
 
-        // Tapering envelope so it pinches in the middle and edges
-        const getEnvelope = (xVal) => {
-            const distFromCenter = Math.abs(xVal - cx) / cx;
-            // 0 at center, 1 at edges. We want it tight at center and edges, wide in between.
-            return Math.sin(distFromCenter * Math.PI);
-        };
+        // Use time combined with audio to drive rotation continuously
+        const baseRotation = frame * 0.01;
+        const maxRadius = Math.min(W, H) * 0.45;
+        const numShapes = 8; // Concentric rings
 
-        const drawMirrorLine = (offset, hueShift, alpha) => {
+        // Calculate a global "energy" to make it look cohesive
+        const energy = bass * 0.6 + mid * 0.3 + high * 0.1;
+
+        for (let s = 0; s < numShapes; s++) {
+            // Calculate number of faces: from 3 (inner triangle) up to ~25 (outer circle approximation)
+            // But let's scale it based on the ring index to meet the "up to 25 faces" requirement
+            const sides = 3 + Math.floor((s / (numShapes - 1)) * 22); // 3 to 25
+
+            // Radius scales outward, modified by wave data to make rings expand/contract
+            // Sample a point in the wave array for this specific shape
+            const waveSample = wave[Math.floor(s * (wave.length / numShapes))];
+            const v = (waveSample / 128.0) - 1.0;
+
+            const baseR = (s + 1) * (maxRadius / numShapes);
+            const radius = baseR + (v * baseR * 0.3) + (bass * baseR * 0.2);
+
+            // Rotation speed alternates direction per shape, driven by frequencies
+            const dir = s % 2 === 0 ? 1 : -1;
+            const rotSpeed = baseRotation * dir * (1 + (s * 0.1) + mid);
+
+            // Hue shifts slightly per ring
+            const hue = (currentVizColorHue + s * 10 + frame * 0.2) % 360;
+            const alpha = 0.5 + energy * 0.5;
+
             ctx.beginPath();
-            ctx.strokeStyle = `hsla(${(currentVizColorHue + hueShift) % 360}, 100%, 60%, ${alpha})`;
-            ctx.lineWidth = 2 + bass * 3;
+            ctx.strokeStyle = `hsla(${hue}, 100%, 60%, ${alpha})`;
+            ctx.shadowColor = `hsla(${hue}, 100%, 50%, 0.8)`;
+            ctx.lineWidth = 1.5 + bass * 2; // Keep lines crisp but slightly thicker on bass
 
-            for (let i = 0; i < wave.length; i++) {
-                let v = (wave[i] / 128.0) - 1.0;
-                const x = i * slice + offset;
-                const envelope = getEnvelope(x);
+            for (let i = 0; i <= sides; i++) {
+                const angle = (i / sides) * Math.PI * 2 + rotSpeed;
+                const x = cx + Math.cos(angle) * radius;
+                const y = cy + Math.sin(angle) * radius;
 
-                // Aggressive reaction to highs and mid
-                const jag = (Math.random() - 0.5) * high * 40 * envelope;
-                const yOffset = (v * H * 0.4 * envelope) + jag;
-
-                // Top line
-                const y = cy - Math.abs(yOffset) - 5;
                 if (i === 0) ctx.moveTo(x, y);
                 else ctx.lineTo(x, y);
             }
+            ctx.closePath();
             ctx.stroke();
 
-            // Bottom mirrored line
-            ctx.beginPath();
-            for (let i = 0; i < wave.length; i++) {
-                let v = (wave[i] / 128.0) - 1.0;
-                const x = i * slice + offset;
-                const envelope = getEnvelope(x);
-                const jag = (Math.random() - 0.5) * high * 40 * envelope;
-                const yOffset = (v * H * 0.4 * envelope) + jag;
+            // Optional: Draw inner connecting spikes on intense bass for complex geometry
+            if (bass > 0.4 && s > 2) {
+                ctx.beginPath();
+                ctx.strokeStyle = `hsla(${(hue + 180) % 360}, 100%, 60%, 0.3)`; // Complementary color
+                ctx.lineWidth = 1;
+                for (let i = 0; i < sides; i++) {
+                    const angle1 = (i / sides) * Math.PI * 2 + rotSpeed;
+                    const angle2 = ((i + 2) % sides / sides) * Math.PI * 2 + rotSpeed; // Skip a vertex
 
-                const y = cy + Math.abs(yOffset) + 5;
-                if (i === 0) ctx.moveTo(x, y);
-                else ctx.lineTo(x, y);
+                    const x1 = cx + Math.cos(angle1) * radius;
+                    const y1 = cy + Math.sin(angle1) * radius;
+                    const x2 = cx + Math.cos(angle2) * radius;
+                    const y2 = cy + Math.sin(angle2) * radius;
+
+                    ctx.moveTo(x1, y1);
+                    ctx.lineTo(x2, y2);
+                }
+                ctx.stroke();
             }
-            ctx.stroke();
-        };
-
-        // Draw multiple passes for glitchy/glowing effect
-        drawMirrorLine(colorOffset1, 0, 0.9); // Main
-        if (bass > 0.3) {
-            drawMirrorLine(colorOffset2, 180, 0.5); // Chromatic secondary
-            drawMirrorLine(-colorOffset1, 90, 0.5); // Chromatic tertiary
         }
     }
 
