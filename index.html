@@ -5306,13 +5306,10 @@
     }
 
     let currentVizColorHue = 120; // Default green
-    let currentVizNumLines = 5;
-
     // Visualization state
     let lastModeSwitchTime = 0;
     const vizModeCycleTime = 60000; // 60 seconds
-    let currentVizMode = 0; // 0: multiwave, 1: particles, 2: circular
-    let vizParticles = [];
+    let currentVizMode = 0; // 0, 1, 2
 
     function pickNewVizColor() {
        // Randomly pick a hue: Green (120), Cyan (180), Blue (210), Purple (270), Magenta (300), Red (0), Orange (30), Yellow (60)
@@ -5330,12 +5327,10 @@
       const now = Date.now();
       if (lastModeSwitchTime === 0) {
           lastModeSwitchTime = now;
-          initVizMode(W, H, currentVizMode);
       } else if (now - lastModeSwitchTime > vizModeCycleTime) {
           lastModeSwitchTime = now;
           pickNewVizColor();
-          currentVizMode = (currentVizMode + 1) % 10;
-          initVizMode(W, H, currentVizMode);
+          currentVizMode = (currentVizMode + 1) % 3;
       }
 
       const { freq, wave } = getAudioData();
@@ -5343,331 +5338,194 @@
       const mid = getAvgAmplitude(freq, 10, 80);
       const high = getAvgAmplitude(freq, 80, 200);
 
-      renderWinampViz(ctx, W, H, freq, wave, bass, mid, high, frame, currentVizMode);
+      renderDeepLineViz(ctx, W, H, freq, wave, bass, mid, high, frame, currentVizMode);
     }
 
 
 
-    // ── Winamp Visualizations ──
-
-    function initVizMode(W, H, mode) {
-        vizParticles = [];
-        if (mode === 6 || mode === 3) { // Particle Fountain or Starfield
-            for (let i = 0; i < 200; i++) {
-                vizParticles.push({
-                    x: Math.random() * W,
-                    y: Math.random() * H,
-                    z: Math.random() * 1000,
-                    vx: (Math.random() - 0.5) * 4,
-                    vy: (Math.random() - 0.5) * 4 - 2, // Upward bias for fountain
-                    radius: Math.random() * 2 + 1,
-                    hue: Math.random() * 360
-                });
-            }
-        } else if (mode === 8) { // Matrix Rain
-            const cols = Math.floor(W / 20);
-            for (let i = 0; i < cols; i++) {
-                vizParticles[i] = Math.random() * H; // y position for each column
-            }
-        } else if (mode === 5) { // Pulsing Geometry (Trails)
-            // Empty, relies on persistent canvas or just draws fresh
-        }
-    }
-
-    function renderWinampViz(ctx, W, H, freq, wave, bass, mid, high, frame, mode) {
+    function renderDeepLineViz(ctx, W, H, freq, wave, bass, mid, high, frame, mode) {
         ctx.save();
 
-        // Different clearing modes based on viz
-        if (mode === 5 || mode === 8 || mode === 4 || mode === 7) { // Trails
-            ctx.fillStyle = `rgba(0, 0, 0, 0.15)`;
-            ctx.fillRect(0, 0, W, H);
-        } else { // Full clear
-            ctx.fillStyle = `rgb(5, 5, 5)`;
-            ctx.fillRect(0, 0, W, H);
-        }
+        // Dynamic fadeout trace based on mode
+        ctx.fillStyle = mode === 1 ? `rgba(0, 0, 0, 0.4)` : `rgba(0, 0, 0, 0.2)`;
+        ctx.fillRect(0, 0, W, H);
 
         ctx.globalCompositeOperation = 'lighter';
-        const t = frame * 0.05;
         const cx = W / 2;
         const cy = H / 2;
+        const t = frame * 0.03;
 
-        switch(mode) {
-            case 0: // Classic Spectrum Bars
-                renderClassicBars(ctx, W, H, freq, wave, currentVizColorHue);
-                break;
-            case 1: // Oscilloscope
-                renderOscilloscope(ctx, W, H, wave, currentVizColorHue, bass);
-                break;
-            case 2: // Radial EQ
-                renderRadialEQ(ctx, cx, cy, Math.min(W, H)*0.3, freq, currentVizColorHue, bass);
-                break;
-            case 3: // Starfield Journey
-                renderStarfield(ctx, W, H, bass, mid);
-                break;
-            case 4: // Lissajous Curves
-                renderLissajous(ctx, cx, cy, Math.min(W,H)*0.4, wave, bass, t, currentVizColorHue);
-                break;
-            case 5: // Pulsing Geometry
-                renderPulsingGeometry(ctx, cx, cy, Math.min(W,H)*0.4, bass, mid, high, t, currentVizColorHue);
-                break;
-            case 6: // Particle Fountain
-                renderParticleFountain(ctx, W, H, bass, mid, high);
-                break;
-            case 7: // Spectrogram/Voiceprint
-                renderVoiceprint(ctx, W, H, freq, frame, currentVizColorHue);
-                break;
-            case 8: // Matrix Rain
-                renderMatrixRain(ctx, W, H, freq, mid);
-                break;
-            case 9: // Mirror Wave
-                renderMirrorWave(ctx, W, H, wave, currentVizColorHue, bass);
-                break;
-            default:
-                renderOscilloscope(ctx, W, H, wave, currentVizColorHue, bass);
+        // Smooth transition overlay logic (fade out current, fade in new)
+        const now = Date.now();
+        let alphaMod = 1.0;
+        const timeSinceSwitch = now - lastModeSwitchTime;
+        if (timeSinceSwitch < 2000) {
+            // Fade in over 2 seconds
+            alphaMod = timeSinceSwitch / 2000;
+        } else if (timeSinceSwitch > vizModeCycleTime - 2000) {
+            // Fade out last 2 seconds
+            alphaMod = (vizModeCycleTime - timeSinceSwitch) / 2000;
         }
+
+        ctx.globalAlpha = alphaMod;
+
+        if (mode === 0) {
+            renderQuantumString(ctx, W, H, cx, cy, wave, bass, mid, high, t);
+        } else if (mode === 1) {
+            renderHolographicCylinder(ctx, W, H, cx, cy, wave, bass, mid, high, t);
+        } else {
+            renderSymmetricalMirror(ctx, W, H, cx, cy, wave, bass, mid, high, t);
+        }
+
         ctx.restore();
     }
 
-    function renderClassicBars(ctx, W, H, freq, hue) {
-        const barWidth = W / 64;
-        for(let i = 0; i < 64; i++) {
-            const val = freq[i * 4] || 0;
-            const h = (val / 255) * H * 0.8;
-            const x = i * barWidth;
-            const y = H - h;
+    // Mode 1: The Quantum String
+    // A single, continuous waveform that undulates in fake 3D space with dynamic gradients and thickness.
+    function renderQuantumString(ctx, W, H, cx, cy, wave, bass, mid, high, t) {
+        ctx.beginPath();
 
-            // Gradient per bar
-            const grad = ctx.createLinearGradient(0, H, 0, y);
-            grad.addColorStop(0, `hsla(${hue}, 100%, 20%, 0.8)`);
-            grad.addColorStop(0.5, `hsla(${hue}, 100%, 50%, 0.8)`);
-            grad.addColorStop(1, `hsla(${hue}, 100%, 80%, 0.8)`);
+        // Multi-stop gradient along the string
+        const grad = ctx.createLinearGradient(0, cy - H/3, 0, cy + H/3);
+        grad.addColorStop(0, `hsla(${currentVizColorHue}, 100%, 70%, 1)`);
+        grad.addColorStop(0.5, `hsla(${(currentVizColorHue + 30) % 360}, 100%, 50%, 0.8)`);
+        grad.addColorStop(1, `hsla(${(currentVizColorHue + 60) % 360}, 100%, 30%, 0.6)`);
 
-            ctx.fillStyle = grad;
-            ctx.fillRect(x + 1, y, barWidth - 2, h);
+        ctx.strokeStyle = grad;
+        ctx.shadowBlur = 20 + bass * 30;
+        ctx.shadowColor = `hsla(${currentVizColorHue}, 100%, 50%, 0.8)`;
 
-            // Peak cap
-            ctx.fillStyle = `white`;
-            ctx.fillRect(x + 1, y - 4, barWidth - 2, 2);
+        const slice = W / wave.length;
+        for (let i = 0; i <= wave.length; i++) {
+            const idx = i === wave.length ? 0 : i; // loop logic for smooth endings
+            let v = (wave[idx] / 128.0) - 1.0;
+
+            // Apply a "twist" envelope using sine waves
+            const envelope = Math.sin((i / wave.length) * Math.PI); // Tapers at edges
+            const twist = Math.sin(t + i * 0.05) * mid * 50;
+            const yOffset = (v * H * 0.3 * envelope) + (twist * envelope);
+
+            const x = i * slice;
+            const y = cy + yOffset;
+
+            // Dynamic width based on wave amplitude and bass
+            const localWidth = 2 + Math.abs(v) * 10 + bass * 15;
+
+            if (i === 0) {
+                ctx.lineWidth = localWidth;
+                ctx.moveTo(x, y);
+            } else {
+                ctx.lineTo(x, y);
+            }
         }
+        ctx.stroke();
     }
 
-    function renderOscilloscope(ctx, W, H, wave, hue, bass) {
-        ctx.beginPath();
-        ctx.strokeStyle = `hsla(${hue}, 100%, 60%, 0.8)`;
-        ctx.lineWidth = 2 + bass * 5;
+    // Mode 2: The Holographic Cylinder
+    // Projects the line waveform as a 3D wireframe cylinder stretching into the distance.
+    function renderHolographicCylinder(ctx, W, H, cx, cy, wave, bass, mid, high, t) {
+        const rings = 12; // Number of rings extending outward
+        const segments = wave.length;
+
         ctx.shadowBlur = 10;
-        ctx.shadowColor = `hsla(${hue}, 100%, 50%, 0.8)`;
+        ctx.shadowColor = `hsla(${currentVizColorHue}, 100%, 60%, 0.5)`;
 
-        const slice = W / wave.length;
-        for(let i=0; i<wave.length; i++) {
-            const v = (wave[i] / 128.0) - 1.0;
-            const y = H/2 + v * H/3;
-            if(i===0) ctx.moveTo(i*slice, y);
-            else ctx.lineTo(i*slice, y);
-        }
-        ctx.stroke();
-    }
-
-    function renderRadialEQ(ctx, cx, cy, radius, freq, hue, bass) {
-        ctx.beginPath();
-        ctx.strokeStyle = `hsla(${hue}, 100%, 60%, 0.8)`;
-        ctx.lineWidth = 3;
-
-        const bands = 64;
-        for(let i=0; i<=bands; i++) {
-            const idx = i === bands ? 0 : i * 4;
-            const val = (freq[idx] || 0) / 255.0;
-            const r = radius + (val * radius * 1.5) + (bass * 20);
-            const a = (i / bands) * Math.PI * 2;
-            const x = cx + Math.cos(a) * r;
-            const y = cy + Math.sin(a) * r;
-            if(i===0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
-        }
-        ctx.closePath();
-        ctx.stroke();
-    }
-
-    function renderStarfield(ctx, W, H, bass, mid) {
-        const cx = W / 2;
-        const cy = H / 2;
-        const speed = 2 + (bass * 20) + (mid * 10);
-
-        for(let i=0; i<vizParticles.length; i++) {
-            let p = vizParticles[i];
-            p.z -= speed;
-            if(p.z <= 0) {
-                p.x = Math.random() * W;
-                p.y = Math.random() * H;
-                p.z = 1000;
-            }
-
-            const scale = 1000 / p.z;
-            const px = (p.x - cx) * scale + cx;
-            const py = (p.y - cy) * scale + cy;
-            const r = p.radius * scale * (1 + bass);
-
-            if(px > 0 && px < W && py > 0 && py < H) {
-                ctx.beginPath();
-                ctx.fillStyle = `hsla(${p.hue}, 100%, 80%, ${scale/2})`;
-                ctx.arc(px, py, Math.max(0.1, r), 0, Math.PI*2);
-                ctx.fill();
-            }
-        }
-    }
-
-    function renderLissajous(ctx, cx, cy, maxR, wave, bass, t, hue) {
-        ctx.beginPath();
-        ctx.strokeStyle = `hsla(${hue}, 100%, 60%, 0.8)`;
-        ctx.lineWidth = 2 + bass * 3;
-
-        // Use wave data to perturb frequencies
-        const a = 3 + (wave[10]/255);
-        const b = 2 + (wave[100]/255);
-
-        for(let i=0; i<200; i++) {
-            const angle = i * 0.1;
-            const r = maxR * 0.8 + (wave[i]/255)*maxR*0.2;
-            const x = cx + Math.sin(a * angle + t) * r;
-            const y = cy + Math.cos(b * angle) * r;
-            if(i===0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
-        }
-        ctx.stroke();
-    }
-
-    function renderPulsingGeometry(ctx, cx, cy, r, bass, mid, high, t, hue) {
-        const sides = 3 + Math.floor(mid * 5); // Triangle to Octagon
-        const radius = r * 0.5 + bass * r;
-        const rot = t * (1 + high);
-
-        ctx.beginPath();
-        ctx.strokeStyle = `hsla(${hue}, 100%, 60%, 0.8)`;
-        ctx.lineWidth = 4;
-
-        for(let i=0; i<=sides; i++) {
-            const a = (i/sides) * Math.PI*2 + rot;
-            const x = cx + Math.cos(a) * radius;
-            const y = cy + Math.sin(a) * radius;
-            if(i===0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
-        }
-        ctx.closePath();
-        ctx.stroke();
-
-        // Inner inverted poly
-        ctx.beginPath();
-        ctx.strokeStyle = `hsla(${(hue+180)%360}, 100%, 60%, 0.8)`;
-        for(let i=0; i<=sides; i++) {
-            const a = (i/sides) * Math.PI*2 - rot*1.5;
-            const x = cx + Math.cos(a) * (radius*0.5);
-            const y = cy + Math.sin(a) * (radius*0.5);
-            if(i===0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
-        }
-        ctx.closePath();
-        ctx.stroke();
-    }
-
-    function renderParticleFountain(ctx, W, H, bass, mid, high) {
-        const cx = W / 2;
-        const cy = H * 0.9;
-
-        for(let i=0; i<vizParticles.length; i++) {
-            let p = vizParticles[i];
-
-            // Gravity and movement
-            p.vy += 0.1;
-            p.x += p.vx;
-            p.y += p.vy;
-
-            // Audio reactivity
-            if(i%2===0) { p.x += (Math.random()-0.5)*mid*10; }
-
-            // Reset at bottom
-            if(p.y > H) {
-                p.y = cy;
-                p.x = cx;
-                p.vy = -5 - (bass * 15) - Math.random() * 5;
-                p.vx = (Math.random() - 0.5) * (10 + mid * 20);
-                p.hue = (currentVizColorHue + Math.random()*60 - 30) % 360;
-            }
-
+        for (let r = rings; r > 0; r--) {
             ctx.beginPath();
-            ctx.fillStyle = `hsla(${p.hue}, 100%, 60%, 0.6)`;
-            ctx.arc(p.x, p.y, p.radius + (high*3), 0, Math.PI*2);
-            ctx.fill();
-        }
-    }
 
-    function renderVoiceprint(ctx, W, H, freq, frame, hue) {
-        // Draw a sweeping spectrogram line
-        const x = (frame * 2) % W;
-        const sliceH = H / freq.length;
+            // Perspective scaling
+            const z = r - (t * 2) % 1; // Move rings towards viewer
+            const scale = 5 / z; // The closer, the larger
+            if (scale < 0) continue;
 
-        for(let i=0; i<freq.length; i+=2) {
-            const val = freq[i] / 255.0;
-            const y = H - (i * sliceH);
-            ctx.fillStyle = `hsla(${hue}, 100%, ${val*100}%, ${val})`;
-            ctx.fillRect(x, y, 3, sliceH*2);
-        }
-        // Draw playhead
-        ctx.fillStyle = 'rgba(255,255,255,0.5)';
-        ctx.fillRect(x+3, 0, 1, H);
-    }
+            const alpha = Math.min(1, (1 - z / rings) + bass * 0.5);
+            ctx.strokeStyle = `hsla(${currentVizColorHue}, 100%, ${60 - z*3}%, ${alpha})`;
+            ctx.lineWidth = 1 * scale + bass * 2;
 
-    function renderMatrixRain(ctx, W, H, freq, mid) {
-        ctx.font = '15px monospace';
-        const cols = vizParticles.length;
-        const colWidth = 20;
+            for (let i = 0; i <= segments; i++) {
+                const idx = i === segments ? 0 : i;
+                let v = (wave[idx] / 128.0) - 1.0;
 
-        for(let i=0; i<cols; i++) {
-            const char = String.fromCharCode(0x30A0 + Math.random() * 96); // Katakana
-            const x = i * colWidth;
-            const y = vizParticles[i];
+                // Base radius of the cylinder + audio displacement
+                const baseRadius = Math.min(W, H) * 0.15;
+                const radius = baseRadius + (v * baseRadius * (0.5 + mid));
 
-            // React to freq band corresponding to column
-            const freqIdx = Math.floor((i / cols) * freq.length);
-            const val = (freq[freqIdx] || 0) / 255.0;
+                // Rotation angle
+                const angle = (i / segments) * Math.PI * 2 + (t * 0.2) + (r * 0.1);
 
-            const isBright = Math.random() < val;
-            ctx.fillStyle = isBright ? '#FFF' : '#0F0';
-            ctx.fillText(char, x, y);
+                // 3D projection to 2D
+                const projectedR = radius * scale;
+                const x = cx + Math.cos(angle) * projectedR;
+                const y = cy + Math.sin(angle) * projectedR;
 
-            vizParticles[i] += 10 + (val * 20) + (mid * 5);
-            if(vizParticles[i] > H) {
-                vizParticles[i] = 0;
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
             }
+            ctx.closePath();
+            ctx.stroke();
         }
     }
 
-    function renderMirrorWave(ctx, W, H, wave, hue, bass) {
-        ctx.beginPath();
-        ctx.strokeStyle = `hsla(${hue}, 100%, 60%, 0.8)`;
-        ctx.lineWidth = 2 + bass * 5;
-
+    // Mode 3: The Symmetrical Mirror-Line
+    // Two razor-thin lines perfectly mirrored across the Y-axis. Responds violently to bass with chromatic aberration.
+    function renderSymmetricalMirror(ctx, W, H, cx, cy, wave, bass, mid, high, t) {
         const slice = W / wave.length;
-        const cy = H / 2;
 
-        // Top wave
-        for(let i=0; i<wave.length; i++) {
-            const v = (wave[i] / 128.0) - 1.0;
-            const y = cy - Math.abs(v * H/3) - 10;
-            if(i===0) ctx.moveTo(i*slice, y);
-            else ctx.lineTo(i*slice, y);
-        }
-        ctx.stroke();
+        // Chromatic aberration offsets on heavy bass
+        const glitchOffset = bass > 0.4 ? (Math.random() - 0.5) * bass * 20 : 0;
+        const colorOffset1 = glitchOffset > 0 ? 15 : 0;
+        const colorOffset2 = glitchOffset < 0 ? -15 : 0;
 
-        // Bottom mirror wave
-        ctx.beginPath();
-        ctx.strokeStyle = `hsla(${(hue+180)%360}, 100%, 60%, 0.5)`;
-        for(let i=0; i<wave.length; i++) {
-            const v = (wave[i] / 128.0) - 1.0;
-            const y = cy + Math.abs(v * H/3) + 10;
-            if(i===0) ctx.moveTo(i*slice, y);
-            else ctx.lineTo(i*slice, y);
+        // Tapering envelope so it pinches in the middle and edges
+        const getEnvelope = (xVal) => {
+            const distFromCenter = Math.abs(xVal - cx) / cx;
+            // 0 at center, 1 at edges. We want it tight at center and edges, wide in between.
+            return Math.sin(distFromCenter * Math.PI);
+        };
+
+        const drawMirrorLine = (offset, hueShift, alpha) => {
+            ctx.beginPath();
+            ctx.strokeStyle = `hsla(${(currentVizColorHue + hueShift) % 360}, 100%, 60%, ${alpha})`;
+            ctx.lineWidth = 2 + bass * 3;
+
+            for (let i = 0; i < wave.length; i++) {
+                let v = (wave[i] / 128.0) - 1.0;
+                const x = i * slice + offset;
+                const envelope = getEnvelope(x);
+
+                // Aggressive reaction to highs and mid
+                const jag = (Math.random() - 0.5) * high * 40 * envelope;
+                const yOffset = (v * H * 0.4 * envelope) + jag;
+
+                // Top line
+                const y = cy - Math.abs(yOffset) - 5;
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+
+            // Bottom mirrored line
+            ctx.beginPath();
+            for (let i = 0; i < wave.length; i++) {
+                let v = (wave[i] / 128.0) - 1.0;
+                const x = i * slice + offset;
+                const envelope = getEnvelope(x);
+                const jag = (Math.random() - 0.5) * high * 40 * envelope;
+                const yOffset = (v * H * 0.4 * envelope) + jag;
+
+                const y = cy + Math.abs(yOffset) + 5;
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+        };
+
+        // Draw multiple passes for glitchy/glowing effect
+        drawMirrorLine(colorOffset1, 0, 0.9); // Main
+        if (bass > 0.3) {
+            drawMirrorLine(colorOffset2, 180, 0.5); // Chromatic secondary
+            drawMirrorLine(-colorOffset1, 90, 0.5); // Chromatic tertiary
         }
-        ctx.stroke();
     }
 
 
