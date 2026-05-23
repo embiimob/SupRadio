@@ -5313,8 +5313,8 @@
        // Randomly pick a hue: Green (120), Cyan (180), Blue (210), Purple (270), Magenta (300), Red (0), Orange (30), Yellow (60)
        const hues = [0, 30, 60, 120, 180, 210, 270, 300];
        currentVizColorHue = hues[Math.floor(Math.random() * hues.length)];
-       // Randomly pick number of lines between 3 and 8
-       currentVizNumLines = Math.floor(Math.random() * (8 - 3 + 1)) + 3;
+       // Randomly pick number of lines between 2 and 3
+       currentVizNumLines = Math.floor(Math.random() * 2) + 2;
        currentVizMode = VIZ_MODES[vizModeIndex % VIZ_MODES.length];
        vizModeIndex += 1;
     }
@@ -5388,38 +5388,76 @@
        ctx.restore();
     }
 
+    // ── Winamp-style tunnel spiral ("flying through") ─────────────────────
+    // Renders tightly-packed concentric rings that spiral and expand, creating
+    // the illusion of flying through a rainbow tunnel.  Audio drives both the
+    // pulse of individual rings and the overall breathing of the tunnel.
     function renderVortexWave(ctx, W, H, freq, wave, bass, mid, high, frame) {
       ctx.save();
-      ctx.fillStyle = `rgba(5, 5, 5, 0.16)`;
+
+      // Soft dark fade keeps a short motion trail without fully clearing the canvas.
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.22)';
       ctx.fillRect(0, 0, W, H);
 
       const cx = W / 2;
       const cy = H / 2;
-      const maxRadius = Math.min(W, H) * 0.48;
-      const lineCount = 7;
-      const step = 2;
-      const baseTime = frame * 0.018;
+      const maxR = Math.min(W, H) * 0.47;
 
-      for (let l = 0; l < lineCount; l += 1) {
-        const hue = (currentVizColorHue + (frame * 1.1) + (l * 28)) % 360;
+      // ── Vignette circle so rings appear to live inside a dark disc ────────
+      const vignette = ctx.createRadialGradient(cx, cy, maxR * 0.72, cx, cy, maxR * 1.05);
+      vignette.addColorStop(0, 'rgba(0,0,0,0)');
+      vignette.addColorStop(1, 'rgba(0,0,0,0.72)');
+      ctx.fillStyle = vignette;
+      ctx.fillRect(0, 0, W, H);
+
+      const RING_COUNT = 44;
+      // Global rotation speed (slow drift)
+      const globalRot = frame * 0.014;
+      // How much each successive ring is angularly offset (creates the spiral look)
+      const SPIRAL_TIGHTNESS = Math.PI * 0.26;
+      // Tunnel rush: as frame advances each ring "moves outward" by this fraction per frame
+      const RUSH_SPEED = 0.55;
+      // Audio-reactive tunnel breath
+      const breathe = 1 + bass * 0.28 + mid * 0.09;
+
+      for (let r = 0; r < RING_COUNT; r += 1) {
+        // Each ring has a position that drifts outward over time (flying through effect)
+        const rawNorm = ((r + frame * RUSH_SPEED) % RING_COUNT) / RING_COUNT;
+        // Non-linear: rings accelerate as they reach the edge (perspective foreshortening)
+        const norm = rawNorm * rawNorm * (3 - 2 * rawNorm); // smooth-step
+        const radius = norm * maxR * breathe;
+        if (radius < 1.5) continue;
+
+        // Color: hue sweeps full spectrum across rings, plus a slow global shift
+        const hue = ((r / RING_COUNT) * 360 + frame * 1.6 + currentVizColorHue) % 360;
+        // Outer rings brighter; fade in at centre and fade out at very edge
+        const edgeFade = rawNorm < 0.06 ? rawNorm / 0.06 : rawNorm > 0.88 ? (1 - rawNorm) / 0.12 : 1;
+        const lightness = 44 + norm * 24;
+        const alpha = edgeFade * (0.62 + norm * 0.28);
+
+        // Per-ring spiral rotation
+        const ringAngle = globalRot + r * SPIRAL_TIGHTNESS;
+
+        // Draw ring as a closed path with audio-reactive wobble on the radius
         ctx.beginPath();
-        ctx.strokeStyle = `hsla(${hue}, 95%, ${48 + l * 3}%, ${0.35 + (l / lineCount) * 0.45})`;
-        ctx.lineWidth = 0.65 + bass * 0.95 + (l / lineCount) * 0.25;
-        let first = true;
-        for (let i = 0; i < wave.length; i += step) {
-          const waveV = ((wave[i] || 128) / 128) - 1;
-          const freqV = (freq[i % freq.length] || 0) / 255;
-          const swirl = baseTime + l * 0.72 + i * (0.05 + (mid * 0.025));
-          const radius = Math.min(maxRadius, (i / wave.length) * maxRadius * (0.55 + freqV * 0.9 + high * 0.3));
-          const x = cx + Math.cos(swirl + waveV * 1.25) * radius;
-          const y = cy + Math.sin(swirl + waveV * 1.25) * radius;
-          if (first) {
-            ctx.moveTo(x, y);
-            first = false;
-          } else {
-            ctx.lineTo(x, y);
-          }
+        const SEG = 72;
+        for (let s = 0; s <= SEG; s += 1) {
+          const angle = (s / SEG) * Math.PI * 2 + ringAngle;
+          // Wave distortion: sample audio waveform around the ring
+          const wIdx = Math.floor((s / SEG) * (wave.length - 1));
+          const waveV = ((wave[wIdx] || 128) / 128) - 1;
+          // Frequency distortion: brighter bands poke outward more
+          const fIdx = Math.min(freq.length - 1, Math.floor(norm * freq.length * 0.75));
+          const freqV = (freq[fIdx] || 0) / 255;
+          const wobble = radius * (1 + waveV * 0.07 + freqV * 0.06 + bass * 0.05);
+          const x = cx + Math.cos(angle) * wobble;
+          const y = cy + Math.sin(angle) * wobble;
+          if (s === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
         }
+        ctx.closePath();
+        ctx.strokeStyle = `hsla(${hue}, 96%, ${lightness}%, ${Math.min(1, alpha)})`;
+        ctx.lineWidth = 0.75 + bass * 0.55 + norm * 0.35;
         ctx.stroke();
       }
       ctx.restore();
