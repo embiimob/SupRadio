@@ -5310,7 +5310,7 @@
     let currentVizMode = VIZ_MODES[0];
     let currentVizColorHue = 120; // Default green
     let currentVizNumLines = 5;
-    let vortexRingDensity = 0; // retained for compatibility
+    let vortexRingDensity = 0;
     let currentVortexPalette = [40, 180, 280, 320];
     let vizNextSwitchAtMs = 0;
     // Platonic beat-envelope state
@@ -5433,8 +5433,7 @@
     }
 
     // ── Outward-expanding concentric rings ────────────────────────────────
-    // Rings spawn at the centre and travel outward, disappearing off-screen.
-    // Only a few rings are alive at once (2-4) with generous spacing.
+    // Starts with few rings and grows to many based on rhythm energy.
     function renderVortexWave(ctx, W, H, freq, wave, bass, mid, high, frame) {
       ctx.save();
 
@@ -5444,33 +5443,28 @@
       const cx = W / 2;
       const cy = H / 2;
       // Allow rings to travel well past the canvas edge.
-      const maxR = Math.max(W, H) * 0.95;
+      const maxR = Math.max(W, H) * 1.18;
 
-      // Frames between successive ring spawns — large value = wide gaps.
-      const SPAWN_INTERVAL = 80;
-      // How many frames a ring lives (controls max ring count ≈ RING_LIFETIME/SPAWN_INTERVAL).
-      const RING_LIFETIME = SPAWN_INTERVAL * 3.4;
-      // Deterministic expansion: radius grows as a power of normalised age.
-      // Power > 1 makes rings start slow at centre and accelerate toward the edge.
-      const firstActive = Math.max(0, Math.floor((frame - RING_LIFETIME) / SPAWN_INTERVAL));
-      const lastActive = Math.floor(frame / SPAWN_INTERVAL);
+      // Beat-responsive density target: quiet ~= 5 rings, loud ~= 25 rings.
+      const ringTarget = Math.min(1, bass * 1.05 + mid * 0.55 + high * 0.2);
+      vortexRingDensity += (ringTarget - vortexRingDensity) * 0.12;
+      const ringCount = Math.round(5 + vortexRingDensity * 20);
 
-      const globalRot = frame * 0.008;
+      // Faster outward drift with stronger rhythm.
+      const driftSpeed = 0.007 + bass * 0.038 + mid * 0.014;
+      const globalRot = frame * (0.009 + high * 0.012);
 
-      for (let r = firstActive; r <= lastActive; r += 1) {
-        const age = frame - r * SPAWN_INTERVAL;
-        if (age < 0) continue;
-        const lifeNorm = Math.min(1, age / RING_LIFETIME);
-        // Quadratic growth: slow start near centre, faster toward the outside.
-        const radius = maxR * Math.pow(lifeNorm, 1.35);
-        if (radius <= 0) continue;
+      for (let r = 0; r < ringCount; r += 1) {
+        const lifeNorm = ((r / ringCount) + frame * driftSpeed) % 1;
+        // Nonlinear expansion keeps wider spacing near the center.
+        const radius = maxR * Math.pow(lifeNorm, 1.27);
+        if (radius <= 1) continue;
 
         // Palette is fixed for the duration of this viz slot.
         const hue = currentVortexPalette[r % currentVortexPalette.length];
         const sat = 72 + (r % 3) * 10;
-        const lightness = 42 + lifeNorm * 22;
-        // Fade in fast from birth; no forced fade-out so rings just leave the screen.
-        const alpha = Math.min(1, lifeNorm / 0.05) * (0.78 + bass * 0.18);
+        const lightness = 40 + lifeNorm * 24;
+        const alpha = Math.min(1, lifeNorm / 0.06) * (0.74 + bass * 0.2);
 
         const ringAngle = globalRot + r * 0.85;
         const SEG = 64;
@@ -5479,8 +5473,11 @@
           const angle = (s / SEG) * Math.PI * 2 + ringAngle;
           const wIdx = Math.floor((s / SEG) * (wave.length - 1));
           const waveV = ((wave[wIdx] || 128) / 128) - 1;
-          // Audio wobble on the ring shape only — does not affect base radius position.
-          const wobbleR = radius * (1 + waveV * 0.055 + bass * 0.04);
+          const fIdx = Math.floor((s / SEG) * (freq.length - 1));
+          const freqV = (freq[fIdx] || 0) / 255;
+          // Stronger audio displacement for more visible wave depth.
+          const wobbleScale = 1 + waveV * (0.16 + high * 0.08) + freqV * 0.12 + bass * 0.11;
+          const wobbleR = radius * Math.max(0.45, wobbleScale);
           const px = cx + Math.cos(angle) * wobbleR;
           const py = cy + Math.sin(angle) * wobbleR;
           if (s === 0) ctx.moveTo(px, py);
@@ -5488,7 +5485,7 @@
         }
         ctx.closePath();
         ctx.strokeStyle = `hsla(${hue}, ${sat}%, ${lightness}%, ${Math.min(1, alpha)})`;
-        ctx.lineWidth = 1.4 + bass * 1.1;
+        ctx.lineWidth = 1.2 + bass * 1.35 + high * 0.45;
         ctx.stroke();
       }
       ctx.restore();
@@ -5577,7 +5574,7 @@
     function project3d([x, y, z], W, H, scale = 1) {
       const perspective = 3.2;
       const depth = perspective + z;
-      const zoom = (Math.min(W, H) * 0.38 * scale) / Math.max(depth, 0.8);
+      const zoom = (Math.min(W, H) * 0.76 * scale) / Math.max(depth, 0.8);
       return [W / 2 + x * zoom, H / 2 + y * zoom];
     }
 
