@@ -5445,7 +5445,7 @@
             // Perspective scaling - slow down forward movement
             const z = r - (slowT * 1.5) % 1; // Move rings towards viewer
             const scale = 5 / z; // The closer, the larger
-            if (scale < 0) continue;
+            if (scale < 0 || scale > 50) continue; // Prevent excessive scaling when z approaches 0
 
             // Dynamic sound-based color shifting
             const dynamicHue = (currentVizColorHue + bass * 100 + mid * 50 + r * 5) % 360;
@@ -5500,13 +5500,17 @@
 
         // A function to project 3D points to 2D
         function project3D(x, y, z) {
-            const perspective = 600;
-            const distance = 400 - (bass * 100); // Move closer on bass
-            const scale = perspective / (perspective + z + distance);
+            const baseScreen = Math.min(W, H);
+            const perspective = baseScreen * 1.5;
+            const distance = baseScreen * 0.5 - (bass * baseScreen * 0.1); // Move closer on bass
+            const zDiv = perspective + z + distance;
+            // Prevent division by zero or negative scale (going behind camera)
+            const scale = zDiv > 0 ? perspective / zDiv : 0;
             return {
                 x: cx + x * scale,
                 y: cy + y * scale,
-                s: scale
+                s: scale,
+                valid: zDiv > 0
             };
         }
 
@@ -5595,8 +5599,10 @@
                     const proj1 = project3D(rot1.x, rot1.y, rot1.z);
                     const proj2 = project3D(rot2.x, rot2.y, rot2.z);
 
-                    ctx.moveTo(proj1.x, proj1.y);
-                    ctx.lineTo(proj2.x, proj2.y);
+                    if (proj1.valid && proj2.valid) {
+                        ctx.moveTo(proj1.x, proj1.y);
+                        ctx.lineTo(proj2.x, proj2.y);
+                    }
                 }
             }
 
@@ -5612,8 +5618,10 @@
                     const proj1 = project3D(rot1.x, rot1.y, rot1.z);
                     const proj2 = project3D(rot2.x, rot2.y, rot2.z);
 
-                    ctx.moveTo(proj1.x, proj1.y);
-                    ctx.lineTo(proj2.x, proj2.y);
+                    if (proj1.valid && proj2.valid) {
+                        ctx.moveTo(proj1.x, proj1.y);
+                        ctx.lineTo(proj2.x, proj2.y);
+                    }
                 }
             }
 
@@ -5621,21 +5629,27 @@
             ctx.stroke();
 
             // Draw cross-connections for more complexity on heavy bass
-            if (bass > 0.6) {
+            if (bass > 0.6 && layers > 1) {
                 ctx.beginPath();
                 ctx.strokeStyle = `hsla(${(hue + 180) % 360}, 100%, 60%, 0.4)`;
                 for (let i = 0; i < sides; i++) {
                     const p = points[i]; // Bottom layer
-                    const nextP = points[2 * sides + ((i + 2) % sides)]; // Top layer offset
+                    // Connect to the top layer safely
+                    const topLayerIndex = (layers - 1) * sides;
+                    const nextP = points[topLayerIndex + ((i + 2) % sides)];
 
-                    const rot1 = rotate3D(p, rx, ry, rz);
-                    const rot2 = rotate3D(nextP, rx, ry, rz);
+                    if (nextP) {
+                        const rot1 = rotate3D(p, rx, ry, rz);
+                        const rot2 = rotate3D(nextP, rx, ry, rz);
 
-                    const proj1 = project3D(rot1.x, rot1.y, rot1.z);
-                    const proj2 = project3D(rot2.x, rot2.y, rot2.z);
+                        const proj1 = project3D(rot1.x, rot1.y, rot1.z);
+                        const proj2 = project3D(rot2.x, rot2.y, rot2.z);
 
-                    ctx.moveTo(proj1.x, proj1.y);
-                    ctx.lineTo(proj2.x, proj2.y);
+                        if (proj1.valid && proj2.valid) {
+                            ctx.moveTo(proj1.x, proj1.y);
+                            ctx.lineTo(proj2.x, proj2.y);
+                        }
+                    }
                 }
                 ctx.stroke();
             }
