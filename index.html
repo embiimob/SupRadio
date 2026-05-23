@@ -5254,12 +5254,40 @@
         const bufLen = 512;
         const wave = new Uint8Array(bufLen);
         const freq = new Uint8Array(bufLen);
-        const t = Date.now() / 500;
         const isPlaying = dom.audio && !dom.audio.paused && dom.audio.currentTime > 0;
-        const amplitude = isPlaying ? 30 : 0;
+
+        // Use playback time to drive the animation, or date fallback
+        const t = isPlaying ? dom.audio.currentTime * 5 : Date.now() / 500;
+
+        // Create a fake beat that pulses based on track playback time
+        const beat = isPlaying ? (Math.sin(t * 2.5) + Math.sin(t * 1.8) + Math.cos(t * 0.8)) / 3 : 0;
+        const beatAmplitude = Math.max(0, beat);
+
+        const amplitude = isPlaying ? 20 + (beatAmplitude * 60) : 0;
+
+        // Generate mock wave and frequency data
         for (let i = 0; i < bufLen; i++) {
-          wave[i] = 128 + Math.sin(i * 0.05 + t) * amplitude;
-          freq[i] = isPlaying ? Math.max(0, 100 - i * 0.5 + Math.random() * 20) : 0;
+          // Complex sine wave combination for a more "musical" looking waveform
+          const v = Math.sin(i * 0.05 + t) +
+                    Math.sin(i * 0.12 - t * 1.2) * 0.5 +
+                    Math.cos(i * 0.01 + t * 0.5) * 0.8;
+
+          wave[i] = 128 + (v / 2.3) * amplitude;
+
+          if (isPlaying) {
+             // Fake frequency bins: bass bump, mid noise, tapering highs
+             let freqVal = 0;
+             if (i < 20) {
+               freqVal = 150 + beatAmplitude * 100 - (i * 5); // Bass
+             } else if (i < 100) {
+               freqVal = 80 + Math.random() * 50 * beatAmplitude - (i * 0.5); // Mids
+             } else {
+               freqVal = Math.max(0, 40 - (i * 0.1) + Math.random() * 20 * beatAmplitude); // Highs
+             }
+             freq[i] = Math.min(255, Math.max(0, freqVal));
+          } else {
+             freq[i] = 0;
+          }
         }
         return { freq, wave };
       }
@@ -5309,6 +5337,13 @@
        const sliceWidth = W * 1.0 / wave.length;
        const t = frame * 0.05;
 
+       // Center point
+       const cx = W / 2;
+       const cy = H / 2;
+
+       // Epic global composite mode for glow
+       ctx.globalCompositeOperation = 'lighter';
+
        // Draw multiple overlapping jagged wave lines
        for (let l = 0; l < numLines; l++) {
            ctx.beginPath();
@@ -5316,26 +5351,37 @@
            // Calculate color based on the selected hue and vary lightness/saturation per line
            const lightness = 40 + (l / numLines) * 20;
            const alpha = 0.4 + (l / numLines) * 0.6;
+
            ctx.strokeStyle = `hsla(${currentVizColorHue}, 100%, ${lightness}%, ${alpha})`;
-           ctx.lineWidth = 1.5 + bass * 2 + (l === numLines - 1 ? 1 : 0);
+           ctx.shadowColor = `hsla(${currentVizColorHue}, 100%, 50%, ${alpha})`;
+           ctx.shadowBlur = 15 + bass * 20;
+           ctx.lineWidth = 1.5 + bass * 2 + (l === numLines - 1 ? 2 : 0);
 
            let x = 0;
            for(let i = 0; i < wave.length; i++) {
+               // Envelope to taper edges and expand middle
+               const distFromCenter = Math.abs(x - cx) / cx; // 0 at center, 1 at edges
+               const envelope = Math.cos(distFromCenter * Math.PI / 2); // 1 at center, 0 at edges
+
                // Base audio wave value (-1 to 1 roughly)
                let v = (wave[i] / 128.0) - 1.0;
 
                // Add a pseudo-random phase offset for each line to make them distinct but related
                const phaseOffset = Math.sin(i * 0.05 + t + l * Math.PI / 2) * 0.5 * mid;
 
-               // Introduce jaggedness for higher lines
-               const jagged = l > 1 ? (Math.random() - 0.5) * high * 5 : 0;
+               // Introduce jaggedness for higher lines reacting to highs
+               const jagged = l > 1 ? (Math.random() - 0.5) * high * 20 * envelope : 0;
 
-               const y = H / 2 + (v * H * 0.3) + (phaseOffset * H * 0.1) + jagged + (l - numLines/2) * 10;
+               // Scale effect by envelope so edges are pinched
+               const yOffset = (v * H * 0.4 * envelope) + (phaseOffset * H * 0.15 * envelope) + jagged;
+
+               // Symmetrical spread from center
+               const y = cy + yOffset + ((l - numLines/2) * 15 * envelope);
 
                if (i === 0) {
                    ctx.moveTo(x, y);
                } else {
-                   // Step-like jagged line effect inspired by the screenshot
+                   // Flowing step-like jagged line effect
                    if (l > 2 && i % 3 === 0) {
                        ctx.lineTo(x, y);
                    } else if (l <= 2) {
@@ -5345,6 +5391,34 @@
                x += sliceWidth;
            }
            ctx.stroke();
+
+           // Vertical Symmetry: mirror the wave
+           if (l % 2 === 0 && bass > 0.2) {
+               ctx.beginPath();
+               x = 0;
+               for(let i = 0; i < wave.length; i++) {
+                   const distFromCenter = Math.abs(x - cx) / cx;
+                   const envelope = Math.cos(distFromCenter * Math.PI / 2);
+                   let v = (wave[i] / 128.0) - 1.0;
+                   const phaseOffset = Math.sin(i * 0.05 + t + l * Math.PI / 2) * 0.5 * mid;
+                   const jagged = l > 1 ? (Math.random() - 0.5) * high * 20 * envelope : 0;
+                   const yOffset = (v * H * 0.4 * envelope) + (phaseOffset * H * 0.15 * envelope) + jagged;
+                   // Invert yOffset
+                   const y = cy - yOffset - ((l - numLines/2) * 15 * envelope);
+
+                   if (i === 0) {
+                       ctx.moveTo(x, y);
+                   } else {
+                       if (l > 2 && i % 3 === 0) {
+                           ctx.lineTo(x, y);
+                       } else if (l <= 2) {
+                           ctx.lineTo(x, y);
+                       }
+                   }
+                   x += sliceWidth;
+               }
+               ctx.stroke();
+           }
        }
        ctx.restore();
     }
