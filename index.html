@@ -5308,6 +5308,9 @@
     let currentVizMode = VIZ_MODES[0];
     let currentVizColorHue = 120; // Default green
     let currentVizNumLines = 5;
+    // Platonic beat-envelope state
+    let platonicBeatEnvelope = 0;
+    let platonicPrevBass = 0;
 
     function pickNewVizStyle() {
        // Randomly pick a hue: Green (120), Cyan (180), Blue (210), Purple (270), Magenta (300), Red (0), Orange (30), Yellow (60)
@@ -5410,13 +5413,14 @@
       ctx.fillStyle = vignette;
       ctx.fillRect(0, 0, W, H);
 
-      const RING_COUNT = 44;
+      // Fewer rings → more visible space between them
+      const RING_COUNT = 20;
       // Global rotation speed (slow drift)
       const globalRot = frame * 0.014;
       // How much each successive ring is angularly offset (creates the spiral look)
       const SPIRAL_TIGHTNESS = Math.PI * 0.26;
       // Tunnel rush: as frame advances each ring "moves outward" by this fraction per frame
-      const RUSH_SPEED = 0.55;
+      const RUSH_SPEED = 0.36;
       // Audio-reactive tunnel breath
       const breathe = 1 + bass * 0.28 + mid * 0.09;
 
@@ -5428,8 +5432,12 @@
         const radius = norm * maxR * breathe;
         if (radius < 1.5) continue;
 
-        // Color: hue sweeps full spectrum across rings, plus a slow global shift
-        const hue = ((r / RING_COUNT) * 360 + frame * 1.6 + currentVizColorHue) % 360;
+        // Color: each ring gets its own slowly-wandering hue so colours feel random
+        // Use two incommensurable sin waves per ring index to break up any periodicity
+        const ringHueSeed = (Math.sin(r * 4.37) * 180 + Math.sin(r * 11.13) * 90 + 360) % 360;
+        const hue = (ringHueSeed + frame * 0.7 + currentVizColorHue * 0.4) % 360;
+        // Vary saturation per ring so some look pastel, some vivid
+        const sat = 70 + Math.abs(Math.sin(r * 2.91 + frame * 0.004)) * 30;
         // Outer rings brighter; fade in at centre and fade out at very edge
         const edgeFade = rawNorm < 0.06 ? rawNorm / 0.06 : rawNorm > 0.88 ? (1 - rawNorm) / 0.12 : 1;
         const lightness = 44 + norm * 24;
@@ -5456,7 +5464,7 @@
           else ctx.lineTo(x, y);
         }
         ctx.closePath();
-        ctx.strokeStyle = `hsla(${hue}, 96%, ${lightness}%, ${Math.min(1, alpha)})`;
+        ctx.strokeStyle = `hsla(${hue}, ${sat}%, ${lightness}%, ${Math.min(1, alpha)})`;
         ctx.lineWidth = 0.75 + bass * 0.55 + norm * 0.35;
         ctx.stroke();
       }
@@ -5547,6 +5555,14 @@
       ctx.fillStyle = `rgba(5, 5, 5, 0.2)`;
       ctx.fillRect(0, 0, W, H);
 
+      // ── Beat envelope: spike on bass attack, decay between beats ──────────
+      const beatThreshold = 0.07;
+      if (bass > platonicPrevBass + beatThreshold) {
+        platonicBeatEnvelope = Math.min(1, platonicBeatEnvelope + (bass - platonicPrevBass) * 5);
+      }
+      platonicBeatEnvelope *= 0.93; // exponential decay toward silence
+      platonicPrevBass = bass;
+
       const levelMax = PLATONIC_SOLIDS.length - 1;
       const cycle = (frame * 0.004) % (levelMax * 2);
       const reflected = cycle <= levelMax ? cycle : (levelMax * 2) - cycle;
@@ -5555,14 +5571,31 @@
       const morphT = reflected - aIdx;
       const solidA = PLATONIC_SOLIDS[aIdx];
       const solidB = PLATONIC_SOLIDS[bIdx];
-      const vertices = morphSolidVertices(solidA, solidB, morphT);
+      const baseMorphedVerts = morphSolidVertices(solidA, solidB, morphT);
       const edgeSet = morphT < 0.5 ? solidA.edges : solidB.edges;
-      const expansion = 1 + Math.sin(frame * 0.02) * 0.22 + bass * 0.22 + high * 0.1;
-      const ax = frame * 0.012 + mid * 0.6;
-      const ay = frame * 0.016 + bass * 0.85;
-      const az = frame * 0.008;
+
+      // Beat grows the shape; silence collapses it back
+      const expansion = 1 + platonicBeatEnvelope * 0.85 + Math.sin(frame * 0.02) * 0.1 + high * 0.12;
+
+      // Mid-reactive vertex wobble: pushes vertices radially outward, creating a "pulse" on each face
+      const midWobble = mid * 0.38;
+      const vertices = baseMorphedVerts.map((v, i) => {
+        const len = Math.hypot(v[0], v[1], v[2]) || 1;
+        const wobble = midWobble * Math.sin(frame * 0.06 + i * 1.73);
+        return [v[0] + (v[0] / len) * wobble, v[1] + (v[1] / len) * wobble, v[2] + (v[2] / len) * wobble];
+      });
+
+      // Rotation: bass speeds up tumble, high adds a roll, beat envelope gives a spin kick
+      const ax = frame * 0.012 + mid * 0.7 + platonicBeatEnvelope * 0.3;
+      const ay = frame * 0.016 + bass * 1.1 + platonicBeatEnvelope * 0.45;
+      const az = frame * 0.008 + high * 0.4;
       const projected = vertices.map((vertex) => project3d(rotate3d(vertex, ax, ay, az), W, H, expansion));
-      const hue = (currentVizColorHue + frame * 1.4) % 360;
+
+      // Color: hue shifts with beat envelope and mid energy for a vivid reactive palette
+      const hue = (currentVizColorHue + frame * 1.1 + platonicBeatEnvelope * 100 + mid * 75) % 360;
+      const edgeSat = 80 + platonicBeatEnvelope * 20;
+      const edgeLit = 50 + platonicBeatEnvelope * 18 + high * 12;
+      const edgeHue2 = (hue + 38 + high * 55) % 360;
 
       ctx.beginPath();
       for (const [i, j] of edgeSet) {
@@ -5571,17 +5604,17 @@
         ctx.moveTo(a[0], a[1]);
         ctx.lineTo(b[0], b[1]);
       }
-      ctx.strokeStyle = `hsla(${hue}, 95%, 62%, 0.82)`;
-      ctx.lineWidth = 0.9 + bass * 0.85;
+      ctx.strokeStyle = `hsla(${hue}, ${edgeSat}%, ${edgeLit}%, 0.88)`;
+      ctx.lineWidth = 0.9 + bass * 0.9 + platonicBeatEnvelope * 1.8;
       ctx.stroke();
 
       ctx.beginPath();
       for (const point of projected) {
         ctx.moveTo(point[0] + 1, point[1]);
-        ctx.arc(point[0], point[1], 0.65 + high * 0.95, 0, Math.PI * 2);
+        ctx.arc(point[0], point[1], 0.65 + high * 1.1 + platonicBeatEnvelope * 1.2, 0, Math.PI * 2);
       }
-      ctx.strokeStyle = `hsla(${(hue + 42) % 360}, 95%, 70%, 0.55)`;
-      ctx.lineWidth = 0.45;
+      ctx.strokeStyle = `hsla(${edgeHue2}, 95%, 72%, ${0.45 + platonicBeatEnvelope * 0.35})`;
+      ctx.lineWidth = 0.45 + platonicBeatEnvelope * 0.5;
       ctx.stroke();
       ctx.restore();
     }
