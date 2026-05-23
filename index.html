@@ -5310,7 +5310,7 @@
     let currentVizMode = VIZ_MODES[0];
     let currentVizColorHue = 120; // Default green
     let currentVizNumLines = 5;
-    let vortexRingDensity = 0;
+    let vortexRingDensity = 0; // retained for compatibility
     let currentVortexPalette = [40, 180, 280, 320];
     let vizNextSwitchAtMs = 0;
     // Platonic beat-envelope state
@@ -5353,7 +5353,11 @@
        }
        if (currentVizMode === 'vortex') {
          currentVortexPalette = createVortexPalette();
-         vortexRingDensity = 0;
+       }
+       if (currentVizMode === 'platonic') {
+         platonicBeatEnvelope = 0;
+         platonicPrevBass = 0;
+         platonicMorphLevel = 0;
        }
        vizNextSwitchAtMs = performance.now() + getRandomVizDurationMs();
     }
@@ -5428,83 +5432,63 @@
        ctx.restore();
     }
 
-    // ── Winamp-style tunnel spiral ("flying through") ─────────────────────
-    // Renders tightly-packed concentric rings that spiral and expand, creating
-    // the illusion of flying through a rainbow tunnel.  Audio drives both the
-    // pulse of individual rings and the overall breathing of the tunnel.
+    // ── Outward-expanding concentric rings ────────────────────────────────
+    // Rings spawn at the centre and travel outward, disappearing off-screen.
+    // Only a few rings are alive at once (2-4) with generous spacing.
     function renderVortexWave(ctx, W, H, freq, wave, bass, mid, high, frame) {
       ctx.save();
 
-      // Soft dark fade keeps a short motion trail without fully clearing the canvas.
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.22)';
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.18)';
       ctx.fillRect(0, 0, W, H);
 
       const cx = W / 2;
       const cy = H / 2;
-      const maxR = Math.min(W, H) * 0.47;
+      // Allow rings to travel well past the canvas edge.
+      const maxR = Math.max(W, H) * 0.95;
 
-      // ── Vignette circle so rings appear to live inside a dark disc ────────
-      const vignette = ctx.createRadialGradient(cx, cy, maxR * 0.72, cx, cy, maxR * 1.05);
-      vignette.addColorStop(0, 'rgba(0,0,0,0)');
-      vignette.addColorStop(1, 'rgba(0,0,0,0.72)');
-      ctx.fillStyle = vignette;
-      ctx.fillRect(0, 0, W, H);
+      // Frames between successive ring spawns — large value = wide gaps.
+      const SPAWN_INTERVAL = 80;
+      // How many frames a ring lives (controls max ring count ≈ RING_LIFETIME/SPAWN_INTERVAL).
+      const RING_LIFETIME = SPAWN_INTERVAL * 3.4;
+      // Deterministic expansion: radius grows as a power of normalised age.
+      // Power > 1 makes rings start slow at centre and accelerate toward the edge.
+      const firstActive = Math.max(0, Math.floor((frame - RING_LIFETIME) / SPAWN_INTERVAL));
+      const lastActive = Math.floor(frame / SPAWN_INTERVAL);
 
-      // Dynamic ring density: strong rhythm fills in more rings, calmer rhythm stays sparse.
-      // Keep this around half the prior density so spacing between rings is much larger.
-      const MAX_RING_COUNT = 10;
-      const MIN_RING_COUNT = 3;
-      const ringTarget = Math.min(1, bass * 1.12 + mid * 0.4);
-      vortexRingDensity += (ringTarget - vortexRingDensity) * 0.14;
-      const ringCount = Math.round(MIN_RING_COUNT + (MAX_RING_COUNT - MIN_RING_COUNT) * vortexRingDensity);
-      // Global rotation speed (slow drift)
-      const globalRot = frame * 0.014;
-      // How much each successive ring is angularly offset (creates the spiral look)
-      const SPIRAL_TIGHTNESS = Math.PI * 0.26;
-      // Tunnel rush: as frame advances each ring "moves outward" by this fraction per frame
-      const RUSH_SPEED = 0.36;
-      // Audio-reactive tunnel breath
-      const breathe = 1 + bass * 0.28 + mid * 0.09;
+      const globalRot = frame * 0.008;
 
-      for (let r = 0; r < ringCount; r += 1) {
-        // Each ring has a position that drifts outward over time (flying through effect)
-        const rawNorm = ((r + frame * RUSH_SPEED) % ringCount) / ringCount;
-        // Non-linear: rings accelerate as they reach the edge (perspective foreshortening)
-        const norm = rawNorm * rawNorm * (3 - 2 * rawNorm); // smooth-step
-        const radius = norm * maxR * breathe;
-        if (radius < 1.5) continue;
+      for (let r = firstActive; r <= lastActive; r += 1) {
+        const age = frame - r * SPAWN_INTERVAL;
+        if (age < 0) continue;
+        const lifeNorm = Math.min(1, age / RING_LIFETIME);
+        // Quadratic growth: slow start near centre, faster toward the outside.
+        const radius = maxR * Math.pow(lifeNorm, 1.35);
+        if (radius <= 0) continue;
 
-        // Palette is picked once per vortex visualization and repeated to create a stable pattern.
+        // Palette is fixed for the duration of this viz slot.
         const hue = currentVortexPalette[r % currentVortexPalette.length];
-        const sat = 74 + (r % 2) * 18;
-        // Outer rings brighter; fade in at centre and fade out at very edge
-        const edgeFade = rawNorm < 0.06 ? rawNorm / 0.06 : rawNorm > 0.88 ? (1 - rawNorm) / 0.12 : 1;
-        const lightness = 40 + norm * 26 + (r % 3) * 3;
-        const alpha = edgeFade * (0.62 + norm * 0.28);
+        const sat = 72 + (r % 3) * 10;
+        const lightness = 42 + lifeNorm * 22;
+        // Fade in fast from birth; no forced fade-out so rings just leave the screen.
+        const alpha = Math.min(1, lifeNorm / 0.05) * (0.78 + bass * 0.18);
 
-        // Per-ring spiral rotation
-        const ringAngle = globalRot + r * SPIRAL_TIGHTNESS;
-
-        // Draw ring as a closed path with audio-reactive wobble on the radius
+        const ringAngle = globalRot + r * 0.85;
+        const SEG = 64;
         ctx.beginPath();
-        const SEG = 72;
         for (let s = 0; s <= SEG; s += 1) {
           const angle = (s / SEG) * Math.PI * 2 + ringAngle;
-          // Wave distortion: sample audio waveform around the ring
           const wIdx = Math.floor((s / SEG) * (wave.length - 1));
           const waveV = ((wave[wIdx] || 128) / 128) - 1;
-          // Frequency distortion: brighter bands poke outward more
-          const fIdx = Math.min(freq.length - 1, Math.floor(norm * freq.length * 0.75));
-          const freqV = (freq[fIdx] || 0) / 255;
-          const wobble = radius * (1 + waveV * 0.07 + freqV * 0.06 + bass * 0.05);
-          const x = cx + Math.cos(angle) * wobble;
-          const y = cy + Math.sin(angle) * wobble;
-          if (s === 0) ctx.moveTo(x, y);
-          else ctx.lineTo(x, y);
+          // Audio wobble on the ring shape only — does not affect base radius position.
+          const wobbleR = radius * (1 + waveV * 0.055 + bass * 0.04);
+          const px = cx + Math.cos(angle) * wobbleR;
+          const py = cy + Math.sin(angle) * wobbleR;
+          if (s === 0) ctx.moveTo(px, py);
+          else ctx.lineTo(px, py);
         }
         ctx.closePath();
         ctx.strokeStyle = `hsla(${hue}, ${sat}%, ${lightness}%, ${Math.min(1, alpha)})`;
-        ctx.lineWidth = 0.75 + bass * 0.55 + norm * 0.35;
+        ctx.lineWidth = 1.4 + bass * 1.1;
         ctx.stroke();
       }
       ctx.restore();
@@ -5551,6 +5535,14 @@
         [0, 1, PHI], [0, -1, PHI], [0, 1, -PHI], [0, -1, -PHI],
         [1, PHI, 0], [-1, PHI, 0], [1, -PHI, 0], [-1, -PHI, 0],
         [PHI, 0, 1], [PHI, 0, -1], [-PHI, 0, 1], [-PHI, 0, -1]
+      ]),
+      // Dodecahedron (20 vertices)
+      buildSolid([
+        [1, 1, 1], [1, 1, -1], [1, -1, 1], [1, -1, -1],
+        [-1, 1, 1], [-1, 1, -1], [-1, -1, 1], [-1, -1, -1],
+        [0, 1/PHI, PHI], [0, -1/PHI, PHI], [0, 1/PHI, -PHI], [0, -1/PHI, -PHI],
+        [1/PHI, PHI, 0], [-1/PHI, PHI, 0], [1/PHI, -PHI, 0], [-1/PHI, -PHI, 0],
+        [PHI, 0, 1/PHI], [PHI, 0, -1/PHI], [-PHI, 0, 1/PHI], [-PHI, 0, -1/PHI]
       ])
     ];
 
@@ -5583,93 +5575,91 @@
     }
 
     function project3d([x, y, z], W, H, scale = 1) {
-      const perspective = 3.1;
+      const perspective = 3.2;
       const depth = perspective + z;
-      const zoom = (Math.min(W, H) * 0.18 * scale) / Math.max(depth, 0.8);
+      const zoom = (Math.min(W, H) * 0.38 * scale) / Math.max(depth, 0.8);
       return [W / 2 + x * zoom, H / 2 + y * zoom];
     }
 
     function renderPlatonicWave(ctx, W, H, freq, wave, bass, mid, high, frame) {
       ctx.save();
-      ctx.fillStyle = `rgba(5, 5, 5, 0.2)`;
+      ctx.fillStyle = `rgba(5, 5, 5, 0.18)`;
       ctx.fillRect(0, 0, W, H);
 
       // ── Beat envelope and complexity accumulator ───────────────────────────
       const beatThreshold = 0.07;
       const beatAttack = Math.max(0, bass - platonicPrevBass - beatThreshold);
       if (beatAttack > 0) {
-        platonicBeatEnvelope = Math.min(2.2, platonicBeatEnvelope + beatAttack * 8.4);
-        // Accumulate complexity on each attack so fast beats can keep adding faces.
-        platonicMorphLevel += beatAttack * 20 + bass * 0.6 + mid * 0.3;
+        platonicBeatEnvelope = Math.min(2.2, platonicBeatEnvelope + beatAttack * 9.5);
+        platonicMorphLevel += beatAttack * 14 + bass * 0.6 + mid * 0.25;
       }
-      // Slow falloff so faces disappear gradually.
+      // Beat envelope decays at a moderate rate (beats die within ~1-2 s of silence).
       platonicBeatEnvelope *= 0.972;
-      platonicMorphLevel *= 0.9965;
-      platonicMorphLevel += bass * 0.018 + mid * 0.012;
+      // Complexity decays very slowly — faces are lost gradually.
+      platonicMorphLevel *= 0.998;
+      platonicMorphLevel += bass * 0.014 + mid * 0.008;
       platonicPrevBass = bass;
 
-      const solidCount = PLATONIC_SOLIDS.length;
-      // No hard cap: as morph level rises, we keep cycling and layering more geometry.
-      const solidPhase = Math.max(0, platonicMorphLevel * 0.32);
+      const solidCount = PLATONIC_SOLIDS.length; // 5 levels: tetra→cube→octa→icosa→dodeca
+      // solidPhase accumulates without any cap; index wraps so shapes keep cycling.
+      const solidPhase = Math.max(0, platonicMorphLevel * 0.24);
       const aIdx = Math.floor(solidPhase) % solidCount;
       const bIdx = (aIdx + 1) % solidCount;
       const morphT = solidPhase - Math.floor(solidPhase);
       const solidA = PLATONIC_SOLIDS[aIdx];
       const solidB = PLATONIC_SOLIDS[bIdx];
-      const baseMorphedVerts = morphSolidVertices(solidA, solidB, morphT);
+      const morphedVerts = morphSolidVertices(solidA, solidB, morphT);
       const edgeSet = morphT < 0.5 ? solidA.edges : solidB.edges;
 
-      // Beat grows the shape; silence collapses it back
-      const expansion = 1 + platonicBeatEnvelope * 0.58 + high * 0.1;
+      // Scale: beat envelope briefly puffs the shape out.
+      const expansion = 1.0 + platonicBeatEnvelope * 0.52 + high * 0.12;
 
-      // Mid-reactive vertex wobble: pushes vertices radially outward, creating a "pulse" on each face
-      const midWobble = mid * 0.38;
-      const vertices = baseMorphedVerts.map((v, i) => {
+      // Mid-reactive vertex wobble produces a "breathing" pulse.
+      const midWobble = mid * 0.3;
+      const vertices = morphedVerts.map((v, i) => {
         const len = Math.hypot(v[0], v[1], v[2]) || 1;
         const wobble = midWobble * Math.sin(frame * 0.06 + i * 1.73);
-        return [v[0] + (v[0] / len) * wobble, v[1] + (v[1] / len) * wobble, v[2] + (v[2] / len) * wobble];
+        return [
+          v[0] + (v[0] / len) * wobble,
+          v[1] + (v[1] / len) * wobble,
+          v[2] + (v[2] / len) * wobble
+        ];
       });
 
-      // Rotation: bass speeds up tumble, high adds a roll, beat envelope gives a spin kick
-      const ax = frame * 0.012 + mid * 0.7 + platonicBeatEnvelope * 0.3;
-      const ay = frame * 0.016 + bass * 1.1 + platonicBeatEnvelope * 0.45;
-      const az = frame * 0.008 + high * 0.4;
+      // Rotation speeds react to bass and beat.
+      const ax = frame * 0.012 + mid * 0.65 + platonicBeatEnvelope * 0.28;
+      const ay = frame * 0.016 + bass * 1.05 + platonicBeatEnvelope * 0.42;
+      const az = frame * 0.008 + high * 0.38;
+      const projected = vertices.map((v) => project3d(rotate3d(v, ax, ay, az), W, H, expansion));
 
-      // Color: hue shifts with beat envelope and mid energy for a vivid reactive palette
-      const hue = (currentVizColorHue + frame * 1.1 + platonicBeatEnvelope * 100 + mid * 75) % 360;
+      // Colour shifts with beat and frequency energy.
+      const hue = (currentVizColorHue + frame * 1.0 + platonicBeatEnvelope * 95 + mid * 70) % 360;
       const edgeSat = 80 + platonicBeatEnvelope * 20;
       const edgeLit = 50 + platonicBeatEnvelope * 18 + high * 12;
-      const edgeHue2 = (hue + 38 + high * 55) % 360;
+      const edgeHue2 = (hue + 42 + high * 55) % 360;
 
-      const shellCount = 1 + Math.floor(Math.log2(platonicMorphLevel + 1) * 2.6);
-      for (let shell = 0; shell < shellCount; shell += 1) {
-        const shellFade = 1 / (1 + shell * 0.55);
-        const shellScale = expansion * (1 + shell * 0.085);
-        const shellAx = ax + shell * 0.085;
-        const shellAy = ay + shell * 0.115;
-        const shellAz = az + shell * 0.06;
-        const projected = vertices.map((vertex) => project3d(rotate3d(vertex, shellAx, shellAy, shellAz), W, H, shellScale));
-
-        ctx.beginPath();
-        for (const [i, j] of edgeSet) {
-          const a = projected[i % projected.length];
-          const b = projected[j % projected.length];
-          ctx.moveTo(a[0], a[1]);
-          ctx.lineTo(b[0], b[1]);
-        }
-        ctx.strokeStyle = `hsla(${(hue + shell * 10) % 360}, ${edgeSat}%, ${edgeLit}%, ${Math.min(0.95, 0.9 * shellFade)})`;
-        ctx.lineWidth = (0.9 + bass * 0.9 + platonicBeatEnvelope * 1.2) * shellFade;
-        ctx.stroke();
-
-        ctx.beginPath();
-        for (const point of projected) {
-          ctx.moveTo(point[0] + 1, point[1]);
-          ctx.arc(point[0], point[1], (0.65 + high * 1.1 + platonicBeatEnvelope * 0.95) * shellFade, 0, Math.PI * 2);
-        }
-        ctx.strokeStyle = `hsla(${(edgeHue2 + shell * 14) % 360}, 95%, 72%, ${Math.min(0.85, (0.45 + platonicBeatEnvelope * 0.2) * shellFade)})`;
-        ctx.lineWidth = (0.45 + platonicBeatEnvelope * 0.32) * shellFade;
-        ctx.stroke();
+      // Draw edges — single crisp solid, no ghost shells.
+      ctx.beginPath();
+      for (const [i, j] of edgeSet) {
+        const a = projected[i % projected.length];
+        const b = projected[j % projected.length];
+        ctx.moveTo(a[0], a[1]);
+        ctx.lineTo(b[0], b[1]);
       }
+      ctx.strokeStyle = `hsla(${hue}, ${edgeSat}%, ${edgeLit}%, 0.92)`;
+      ctx.lineWidth = 1.2 + bass * 1.2 + platonicBeatEnvelope * 1.5;
+      ctx.stroke();
+
+      // Draw vertex dots.
+      ctx.beginPath();
+      for (const pt of projected) {
+        ctx.moveTo(pt[0] + 1.5, pt[1]);
+        ctx.arc(pt[0], pt[1], 1.5 + high * 2.0 + platonicBeatEnvelope * 1.4, 0, Math.PI * 2);
+      }
+      ctx.strokeStyle = `hsla(${edgeHue2}, 95%, 72%, ${0.55 + platonicBeatEnvelope * 0.38})`;
+      ctx.lineWidth = 0.9 + platonicBeatEnvelope * 0.55;
+      ctx.stroke();
+
       ctx.restore();
     }
 
