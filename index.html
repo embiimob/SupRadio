@@ -5308,8 +5308,8 @@
     let currentVizColorHue = 120; // Default green
     // Visualization state
     let lastModeSwitchTime = 0;
-    const vizModeCycleTime = 60000; // 60 seconds
-    let currentVizMode = 0; // 0, 1, 2
+    let vizModeCycleTime = 30000 + Math.random() * 30000; // 30 to 60 seconds
+    let currentVizMode = Math.floor(Math.random() * 3); // 0, 1, 2
 
     function pickNewVizColor() {
        // Randomly pick a hue: Green (120), Cyan (180), Blue (210), Purple (270), Magenta (300), Red (0), Orange (30), Yellow (60)
@@ -5329,8 +5329,11 @@
           lastModeSwitchTime = now;
       } else if (now - lastModeSwitchTime > vizModeCycleTime) {
           lastModeSwitchTime = now;
+          vizModeCycleTime = 30000 + Math.random() * 30000; // Random length between 30s-60s
           pickNewVizColor();
-          currentVizMode = (currentVizMode + 1) % 3;
+          // Pick a random mode that is NOT the current mode
+          const remainingModes = [0, 1, 2].filter(m => m !== currentVizMode);
+          currentVizMode = remainingModes[Math.floor(Math.random() * remainingModes.length)];
       }
 
       const { freq, wave } = getAudioData();
@@ -5396,14 +5399,18 @@
         ctx.shadowColor = `hsla(${currentVizColorHue}, 100%, 50%, 0.8)`;
 
         const slice = W / wave.length;
+        // Slow down the scrolling speed of the twist
+        const slowT = t * 0.3;
         for (let i = 0; i <= wave.length; i++) {
             const idx = i === wave.length ? 0 : i; // loop logic for smooth endings
             let v = (wave[idx] / 128.0) - 1.0;
 
             // Apply a "twist" envelope using sine waves
             const envelope = Math.sin((i / wave.length) * Math.PI); // Tapers at edges
-            const twist = Math.sin(t + i * 0.05) * mid * 50;
-            const yOffset = (v * H * 0.3 * envelope) + (twist * envelope);
+            // Make it react significantly more to audio
+            const twist = Math.sin(slowT + i * 0.02) * (mid * 150 + bass * 100);
+            // Increase base amplitude reaction
+            const yOffset = (v * H * 0.6 * envelope) + (twist * envelope);
 
             const x = i * slice;
             const y = cy + yOffset;
@@ -5430,11 +5437,13 @@
         ctx.shadowBlur = 10;
         ctx.shadowColor = `hsla(${currentVizColorHue}, 100%, 60%, 0.5)`;
 
+        const slowT = t * 0.2; // Slow down the animation significantly
+
         for (let r = rings; r > 0; r--) {
             ctx.beginPath();
 
-            // Perspective scaling
-            const z = r - (t * 2) % 1; // Move rings towards viewer
+            // Perspective scaling - slow down forward movement
+            const z = r - (slowT * 1.5) % 1; // Move rings towards viewer
             const scale = 5 / z; // The closer, the larger
             if (scale < 0) continue;
 
@@ -5446,12 +5455,12 @@
                 const idx = i === segments ? 0 : i;
                 let v = (wave[idx] / 128.0) - 1.0;
 
-                // Base radius of the cylinder + audio displacement
+                // Base radius of the cylinder + audio displacement - react more to sound
                 const baseRadius = Math.min(W, H) * 0.15;
-                const radius = baseRadius + (v * baseRadius * (0.5 + mid));
+                const radius = baseRadius + (v * baseRadius * (1.5 + mid * 2 + bass));
 
-                // Rotation angle
-                const angle = (i / segments) * Math.PI * 2 + (t * 0.2) + (r * 0.1);
+                // Rotation angle - slow down spin
+                const angle = (i / segments) * Math.PI * 2 + (slowT * 0.1) + (r * 0.1);
 
                 // 3D projection to 2D
                 const projectedR = radius * scale;
@@ -5467,72 +5476,141 @@
     }
 
 
-    // Mode 3: Spinning Polygons
-    // Concentric spinning geometric shapes reacting dynamically to audio.
+    // Mode 3: 3D Wireframe Shapes
+    // Slow rotating 3D platonic-like objects that distort based on sound
     function renderSpinningShapes(ctx, W, H, cx, cy, wave, bass, mid, high, frame) {
         ctx.shadowBlur = 15;
+        const slowT = frame * 0.005; // Slow rotation
 
-        // Use time combined with audio to drive rotation continuously
-        const baseRotation = frame * 0.01;
-        const maxRadius = Math.min(W, H) * 0.45;
-        const numShapes = 8; // Concentric rings
+        // A function to project 3D points to 2D
+        function project3D(x, y, z) {
+            const perspective = 600;
+            const distance = 400 - (bass * 100); // Move closer on bass
+            const scale = perspective / (perspective + z + distance);
+            return {
+                x: cx + x * scale,
+                y: cy + y * scale,
+                s: scale
+            };
+        }
 
-        // Calculate a global "energy" to make it look cohesive
-        const energy = bass * 0.6 + mid * 0.3 + high * 0.1;
+        // 3D rotation matrix application
+        function rotate3D(p, rx, ry, rz) {
+            // rotate around Z
+            let x1 = p.x * Math.cos(rz) - p.y * Math.sin(rz);
+            let y1 = p.x * Math.sin(rz) + p.y * Math.cos(rz);
+            let z1 = p.z;
+            // rotate around Y
+            let x2 = x1 * Math.cos(ry) + z1 * Math.sin(ry);
+            let y2 = y1;
+            let z2 = -x1 * Math.sin(ry) + z1 * Math.cos(ry);
+            // rotate around X
+            let x3 = x2;
+            let y3 = y2 * Math.cos(rx) - z2 * Math.sin(rx);
+            let z3 = y2 * Math.sin(rx) + z2 * Math.cos(rx);
 
-        for (let s = 0; s < numShapes; s++) {
-            // Calculate number of faces: from 3 (inner triangle) up to ~25 (outer circle approximation)
-            // But let's scale it based on the ring index to meet the "up to 25 faces" requirement
-            const sides = 3 + Math.floor((s / (numShapes - 1)) * 22); // 3 to 25
+            return {x: x3, y: y3, z: z3};
+        }
 
-            // Radius scales outward, modified by wave data to make rings expand/contract
-            // Sample a point in the wave array for this specific shape
-            const waveSample = wave[Math.floor(s * (wave.length / numShapes))];
-            const v = (waveSample / 128.0) - 1.0;
+        const numShapes = 4;
+        const maxRadius = Math.min(W, H) * 0.3;
 
-            const baseR = (s + 1) * (maxRadius / numShapes);
-            const radius = baseR + (v * baseR * 0.3) + (bass * baseR * 0.2);
+        for(let s = 0; s < numShapes; s++) {
+            // Base geometry sizes
+            let r = maxRadius * ((s + 1) / numShapes);
+            r = r + (bass * r * 0.5) + (mid * r * 0.2); // Significant scale reaction
 
-            // Rotation speed alternates direction per shape, driven by frequencies
-            const dir = s % 2 === 0 ? 1 : -1;
-            const rotSpeed = baseRotation * dir * (1 + (s * 0.1) + mid);
+            // Generate vertices for a generic 3D shape (like a prism or icosphere approximation)
+            // We'll generate a cylinder-like 3D wireframe that spins
+            const points = [];
+            const sides = 3 + (s * 4); // 3, 7, 11, 15
+            const layers = 3;
 
-            // Hue shifts slightly per ring
-            const hue = (currentVizColorHue + s * 10 + frame * 0.2) % 360;
-            const alpha = 0.5 + energy * 0.5;
+            for (let l = -1; l <= 1; l++) {
+                // Modulate layer height by audio
+                const heightOffset = l * (r * 0.8) * (1 + high);
+                for (let i = 0; i < sides; i++) {
+                    const angle = (i / sides) * Math.PI * 2;
+                    // Introduce audio noise into vertex positions
+                    const waveIdx = Math.floor((i + l + s) * (wave.length / (sides * layers)));
+                    const v = (wave[waveIdx % wave.length] / 128.0) - 1.0;
 
-            ctx.beginPath();
-            ctx.strokeStyle = `hsla(${hue}, 100%, 60%, ${alpha})`;
-            ctx.shadowColor = `hsla(${hue}, 100%, 50%, 0.8)`;
-            ctx.lineWidth = 1.5 + bass * 2; // Keep lines crisp but slightly thicker on bass
+                    const pR = r * (1 + v * 0.4); // Vertices bulge in/out
 
-            for (let i = 0; i <= sides; i++) {
-                const angle = (i / sides) * Math.PI * 2 + rotSpeed;
-                const x = cx + Math.cos(angle) * radius;
-                const y = cy + Math.sin(angle) * radius;
-
-                if (i === 0) ctx.moveTo(x, y);
-                else ctx.lineTo(x, y);
+                    points.push({
+                        x: Math.cos(angle) * pR,
+                        y: heightOffset,
+                        z: Math.sin(angle) * pR
+                    });
+                }
             }
-            ctx.closePath();
+
+            // Rotation angles (slow)
+            const dir = s % 2 === 0 ? 1 : -1;
+            const rx = slowT * dir * 1.1;
+            const ry = slowT * 1.3;
+            const rz = slowT * dir * 0.7;
+
+            // Draw the wireframe
+            ctx.beginPath();
+            const hue = (currentVizColorHue + s * 20 + frame * 0.1) % 360;
+            ctx.strokeStyle = `hsla(${hue}, 100%, 60%, ${0.5 + bass * 0.5})`;
+            ctx.shadowColor = `hsla(${hue}, 100%, 50%, 0.8)`;
+            ctx.lineWidth = 1.5 + bass * 1;
+
+            // Render horizontal rings
+            for (let l = 0; l < layers; l++) {
+                for (let i = 0; i < sides; i++) {
+                    const p = points[l * sides + i];
+                    const nextP = points[l * sides + ((i + 1) % sides)];
+
+                    const rot1 = rotate3D(p, rx, ry, rz);
+                    const rot2 = rotate3D(nextP, rx, ry, rz);
+
+                    const proj1 = project3D(rot1.x, rot1.y, rot1.z);
+                    const proj2 = project3D(rot2.x, rot2.y, rot2.z);
+
+                    ctx.moveTo(proj1.x, proj1.y);
+                    ctx.lineTo(proj2.x, proj2.y);
+                }
+            }
+
+            // Render vertical connections
+            for (let l = 0; l < layers - 1; l++) {
+                for (let i = 0; i < sides; i++) {
+                    const p = points[l * sides + i];
+                    const nextP = points[(l + 1) * sides + i];
+
+                    const rot1 = rotate3D(p, rx, ry, rz);
+                    const rot2 = rotate3D(nextP, rx, ry, rz);
+
+                    const proj1 = project3D(rot1.x, rot1.y, rot1.z);
+                    const proj2 = project3D(rot2.x, rot2.y, rot2.z);
+
+                    ctx.moveTo(proj1.x, proj1.y);
+                    ctx.lineTo(proj2.x, proj2.y);
+                }
+            }
+
+            // Stroke the primary wireframes BEFORE drawing cross connections
             ctx.stroke();
 
-            // Optional: Draw inner connecting spikes on intense bass for complex geometry
-            if (bass > 0.4 && s > 2) {
+            // Draw cross-connections for more complexity on heavy bass
+            if (bass > 0.6) {
                 ctx.beginPath();
-                ctx.strokeStyle = `hsla(${(hue + 180) % 360}, 100%, 60%, 0.3)`; // Complementary color
-                ctx.lineWidth = 1;
+                ctx.strokeStyle = `hsla(${(hue + 180) % 360}, 100%, 60%, 0.4)`;
                 for (let i = 0; i < sides; i++) {
-                    const angle1 = (i / sides) * Math.PI * 2 + rotSpeed;
-                    const angle2 = ((i + 2) % sides / sides) * Math.PI * 2 + rotSpeed; // Skip a vertex
+                    const p = points[i]; // Bottom layer
+                    const nextP = points[2 * sides + ((i + 2) % sides)]; // Top layer offset
 
-                    const x1 = cx + Math.cos(angle1) * radius;
-                    const y1 = cy + Math.sin(angle1) * radius;
-                    const x2 = cx + Math.cos(angle2) * radius;
-                    const y2 = cy + Math.sin(angle2) * radius;
+                    const rot1 = rotate3D(p, rx, ry, rz);
+                    const rot2 = rotate3D(nextP, rx, ry, rz);
 
-                    ctx.moveTo(x1, y1);
-                    ctx.lineTo(x2, y2);
+                    const proj1 = project3D(rot1.x, rot1.y, rot1.z);
+                    const proj2 = project3D(rot2.x, rot2.y, rot2.z);
+
+                    ctx.moveTo(proj1.x, proj1.y);
+                    ctx.lineTo(proj2.x, proj2.y);
                 }
                 ctx.stroke();
             }
