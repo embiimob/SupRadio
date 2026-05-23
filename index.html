@@ -1406,6 +1406,9 @@
     const STANDARD_SEARCH_QTY = 200;
     const TRENDING_SEARCH_QTY = 200;
     const TRENDING_KEYWORD_FETCH_TIMEOUT_MS = 12000;
+    const P2FK_FETCH_TIMEOUT_MS = 15000;
+    const P2FK_FETCH_RETRY_ATTEMPTS = 2;
+    const SEARCH_RECOVERY_RETRY_QTY = 120;
     const TRENDING_KEYWORD_FETCH_CONCURRENCY = 4;
     const PRELOAD_COUNT = 5;
     const TICKER_SCROLL_SPEED_PX_PER_SECOND = 44;
@@ -1526,6 +1529,34 @@
     let composeProfileAvatarCandidateIndex = 0;
 
     const normalize = (value) => (typeof value === 'string' ? value.trim() : '');
+    const delay = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+    async function fetchWithTimeout(endpoint, {
+      timeoutMs = P2FK_FETCH_TIMEOUT_MS,
+      attempts = P2FK_FETCH_RETRY_ATTEMPTS,
+      responseType = 'json',
+      ...fetchOptions
+    } = {}) {
+      let lastError = null;
+      for (let attempt = 1; attempt <= attempts; attempt += 1) {
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          const response = await fetch(endpoint, { ...fetchOptions, signal: controller.signal });
+          if (!response.ok) throw new Error(`request failed (${response.status})`);
+          if (responseType === 'text') return response.text();
+          return response.json();
+        } catch (error) {
+          lastError = error?.name === 'AbortError'
+            ? new Error(`request timeout (${timeoutMs}ms)`)
+            : error;
+          if (attempt >= attempts) throw lastError;
+          await delay(Math.min(350 * attempt, 900));
+        } finally {
+          window.clearTimeout(timeoutId);
+        }
+      }
+      throw lastError || new Error('request failed');
+    }
     const decodeHtmlEntities = (text) => {
       if (typeof text !== 'string') return '';
       return text
@@ -4251,46 +4282,30 @@
 
     async function getPublicAddressByKeyword(keyword) {
       const endpoint = `${P2FK_BASE_URL}/GetPublicAddressByKeyword/${encodeURIComponent(keyword)}?mainnet=${USE_P2FK_MAINNET}`;
-      const response = await fetch(endpoint);
-      if (!response.ok) throw new Error(`address lookup failed (${response.status})`);
-      const payload = normalize(await response.text()).replace(/^"|"$/g, '');
+      const payload = normalize(await fetchWithTimeout(endpoint, { responseType: 'text' })).replace(/^"|"$/g, '');
       if (!payload) throw new Error('keyword address not found');
       return payload;
     }
 
-    async function getPublicMessagesByAddress(address, skip = 0, qty = 200) {
+    async function getPublicMessagesByAddress(address, skip = 0, qty = 200, timeoutMs = P2FK_FETCH_TIMEOUT_MS) {
       const endpoint = `${P2FK_BASE_URL}/GetPublicMessagesByAddress/${encodeURIComponent(address)}?skip=${skip}&qty=${qty}&mainnet=${USE_P2FK_MAINNET}`;
-      const response = await fetch(endpoint);
-      if (!response.ok) throw new Error(`message lookup failed (${response.status})`);
-      const payload = await response.json();
+      const payload = await fetchWithTimeout(endpoint, { timeoutMs });
       return asArray(payload);
     }
 
-    async function getKnownRootsBySearchString(searchString, skip = 0, qty = 200) {
+    async function getKnownRootsBySearchString(searchString, skip = 0, qty = 200, timeoutMs = P2FK_FETCH_TIMEOUT_MS) {
       const endpoint = `${P2FK_BASE_URL}/GetKnownRootsBySearchString?searchString=${encodeURIComponent(searchString)}&skip=${skip}&qty=${qty}&mainnet=${USE_P2FK_MAINNET}&showSystemFiles=false`;
-      const response = await fetch(endpoint);
-      if (!response.ok) throw new Error(`search lookup failed (${response.status})`);
-      const payload = await response.json();
+      const payload = await fetchWithTimeout(endpoint, { timeoutMs });
       return asArray(payload);
     }
 
     async function getKnownRootsBySearchStringWithTimeout(searchString, skip = 0, qty = 200, timeoutMs = TRENDING_KEYWORD_FETCH_TIMEOUT_MS) {
-      let timeoutId = null;
-      try {
-        return await Promise.race([
-          getKnownRootsBySearchString(searchString, skip, qty),
-          new Promise((_, reject) => {
-            timeoutId = setTimeout(() => reject(new Error(`search lookup timeout (${timeoutMs}ms)`)), timeoutMs);
-          })
-        ]);
-      } finally {
-        if (timeoutId) clearTimeout(timeoutId);
-      }
+      return getKnownRootsBySearchString(searchString, skip, qty, timeoutMs);
     }
 
-    async function getKeywordChannelMessages(keyword) {
+    async function getKeywordChannelMessages(keyword, timeoutMs = P2FK_FETCH_TIMEOUT_MS) {
       const address = await getPublicAddressByKeyword(keyword);
-      return getPublicMessagesByAddress(address, 0, 200);
+      return getPublicMessagesByAddress(address, 0, 200, timeoutMs);
     }
 
     async function fetchTrendingKeywordMessages(keyword) {
@@ -4304,10 +4319,10 @@
       return mergeUniqueMessagesByTxid(channelRaw, searchRaw);
     }
 
-    async function queryP2FK(keyword) {
+    async function queryP2FK(keyword, { maxSearchQty = STANDARD_SEARCH_QTY, timeoutMs = P2FK_FETCH_TIMEOUT_MS } = {}) {
       const [keywordChannelResult, mainSearchResult] = await Promise.allSettled([
-        getKeywordChannelMessages(keyword),
-        getKnownRootsSearchWindow(keyword, STANDARD_SEARCH_QTY)
+        getKeywordChannelMessages(keyword, timeoutMs),
+        getKnownRootsSearchWindow(keyword, maxSearchQty, timeoutMs)
       ]);
       const keywordMessages = keywordChannelResult.status === 'fulfilled' ? keywordChannelResult.value : [];
       const mainSearchMessages = mainSearchResult.status === 'fulfilled' ? mainSearchResult.value : [];
@@ -4318,6 +4333,18 @@
         throw new Error('no playable audio files in keyword or search results');
       }
       return { items, messages, addressLabels };
+    }
+
+    async function queryP2FKWithRecovery(keyword) {
+      try {
+        return await queryP2FK(keyword);
+      } catch (firstError) {
+        console.warn('Primary keyword search failed; retrying with reduced search window', firstError);
+        return queryP2FK(keyword, {
+          maxSearchQty: SEARCH_RECOVERY_RETRY_QTY,
+          timeoutMs: TRENDING_KEYWORD_FETCH_TIMEOUT_MS
+        });
+      }
     }
 
     function extractSearchString(entry) {
@@ -4380,14 +4407,14 @@
     }
 
 
-    async function getKnownRootsSearchWindow(searchString, maxSearchQty = STANDARD_SEARCH_QTY) {
+    async function getKnownRootsSearchWindow(searchString, maxSearchQty = STANDARD_SEARCH_QTY, timeoutMs = P2FK_FETCH_TIMEOUT_MS) {
       const STANDARD_SEARCH_PAGE_SIZE = 25;
       const messages = [];
       let skip = 0;
       while (skip < maxSearchQty) {
         const remaining = maxSearchQty - skip;
         const qty = Math.min(STANDARD_SEARCH_PAGE_SIZE, remaining);
-        const page = await getKnownRootsBySearchString(searchString, skip, qty);
+        const page = await getKnownRootsBySearchString(searchString, skip, qty, timeoutMs);
         const pageRows = asArray(page);
         if (!pageRows.length) break;
         messages.push(...pageRows);
@@ -4811,7 +4838,7 @@
       try {
         const result = isTrendingDefault
           ? await queryTrendingP2FK()
-          : await queryP2FK(cleanedInput);
+          : await queryP2FKWithRecovery(cleanedInput);
         if (requestId !== loadSearchRequestId) return;
         if (isTrendingDefault && result?.displayKeyword) {
           displayKeyword = result.displayKeyword;
@@ -5061,7 +5088,6 @@
     }
 
     function connectAudioToAnalyser() {
-      if (isIOS()) return;
       ensureAudioContext();
       try {
         if (audioSourceNode) {
@@ -5222,11 +5248,11 @@
       const canvas = dom.visualizerCanvas;
       if (!canvas) return;
       resizeCanvas();
-      pickNewVizColor();
+      pickNewVizStyle();
       let frame = Math.floor(Math.random() * 10000);
       function tick() {
         vizAnimFrameId = requestAnimationFrame(tick);
-        frame++;
+        frame += 0.55;
         drawViz(canvas, frame);
       }
       tick();
@@ -5250,7 +5276,7 @@
 
     // ── Main visualization renderer ───────────────────────────────────────
     function getAudioData() {
-      if (!analyserNode || isIOS()) {
+      if (!analyserNode) {
         const bufLen = 512;
         const wave = new Uint8Array(bufLen);
         const freq = new Uint8Array(bufLen);
@@ -5277,15 +5303,20 @@
       return sum / (end - start) / 255;
     }
 
+    const VIZ_MODES = ['multiwave', 'vortex', 'platonic'];
+    let vizModeIndex = 0;
+    let currentVizMode = VIZ_MODES[0];
     let currentVizColorHue = 120; // Default green
     let currentVizNumLines = 5;
 
-    function pickNewVizColor() {
+    function pickNewVizStyle() {
        // Randomly pick a hue: Green (120), Cyan (180), Blue (210), Purple (270), Magenta (300), Red (0), Orange (30), Yellow (60)
        const hues = [0, 30, 60, 120, 180, 210, 270, 300];
        currentVizColorHue = hues[Math.floor(Math.random() * hues.length)];
        // Randomly pick number of lines between 3 and 8
        currentVizNumLines = Math.floor(Math.random() * (8 - 3 + 1)) + 3;
+       currentVizMode = VIZ_MODES[vizModeIndex % VIZ_MODES.length];
+       vizModeIndex += 1;
     }
 
     function drawViz(canvas, frame) {
@@ -5297,6 +5328,14 @@
       const mid = getAvgAmplitude(freq, 10, 80);
       const high = getAvgAmplitude(freq, 80, 200);
 
+      if (currentVizMode === 'vortex') {
+        renderVortexWave(ctx, W, H, freq, wave, bass, mid, high, frame);
+        return;
+      }
+      if (currentVizMode === 'platonic') {
+        renderPlatonicWave(ctx, W, H, freq, wave, bass, mid, high, frame);
+        return;
+      }
       renderMultiWave(ctx, W, H, freq, wave, bass, mid, high, frame, currentVizNumLines);
     }
 
@@ -5307,7 +5346,7 @@
        ctx.fillRect(0, 0, W, H);
 
        const sliceWidth = W * 1.0 / wave.length;
-       const t = frame * 0.05;
+       const t = frame * 0.026;
 
        // Draw multiple overlapping jagged wave lines
        for (let l = 0; l < numLines; l++) {
@@ -5317,7 +5356,7 @@
            const lightness = 40 + (l / numLines) * 20;
            const alpha = 0.4 + (l / numLines) * 0.6;
            ctx.strokeStyle = `hsla(${currentVizColorHue}, 100%, ${lightness}%, ${alpha})`;
-           ctx.lineWidth = 1.5 + bass * 2 + (l === numLines - 1 ? 1 : 0);
+           ctx.lineWidth = 0.7 + bass * 1.1 + (l === numLines - 1 ? 0.35 : 0);
 
            let x = 0;
            for(let i = 0; i < wave.length; i++) {
@@ -5347,6 +5386,166 @@
            ctx.stroke();
        }
        ctx.restore();
+    }
+
+    function renderVortexWave(ctx, W, H, freq, wave, bass, mid, high, frame) {
+      ctx.save();
+      ctx.fillStyle = `rgba(5, 5, 5, 0.16)`;
+      ctx.fillRect(0, 0, W, H);
+
+      const cx = W / 2;
+      const cy = H / 2;
+      const maxRadius = Math.min(W, H) * 0.48;
+      const lineCount = 7;
+      const step = 2;
+      const baseTime = frame * 0.018;
+
+      for (let l = 0; l < lineCount; l += 1) {
+        const hue = (currentVizColorHue + (frame * 1.1) + (l * 28)) % 360;
+        ctx.beginPath();
+        ctx.strokeStyle = `hsla(${hue}, 95%, ${48 + l * 3}%, ${0.35 + (l / lineCount) * 0.45})`;
+        ctx.lineWidth = 0.65 + bass * 0.95 + (l / lineCount) * 0.25;
+        let first = true;
+        for (let i = 0; i < wave.length; i += step) {
+          const waveV = ((wave[i] || 128) / 128) - 1;
+          const freqV = (freq[i % freq.length] || 0) / 255;
+          const swirl = baseTime + l * 0.72 + i * (0.05 + (mid * 0.025));
+          const radius = Math.min(maxRadius, (i / wave.length) * maxRadius * (0.55 + freqV * 0.9 + high * 0.3));
+          const x = cx + Math.cos(swirl + waveV * 1.25) * radius;
+          const y = cy + Math.sin(swirl + waveV * 1.25) * radius;
+          if (first) {
+            ctx.moveTo(x, y);
+            first = false;
+          } else {
+            ctx.lineTo(x, y);
+          }
+        }
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    function buildSolid(vertices) {
+      let edgeDistance = Infinity;
+      for (let i = 0; i < vertices.length; i += 1) {
+        for (let j = i + 1; j < vertices.length; j += 1) {
+          const dx = vertices[i][0] - vertices[j][0];
+          const dy = vertices[i][1] - vertices[j][1];
+          const dz = vertices[i][2] - vertices[j][2];
+          const d = Math.hypot(dx, dy, dz);
+          if (d > 0.0001 && d < edgeDistance) edgeDistance = d;
+        }
+      }
+      const tolerance = edgeDistance * 0.14;
+      const edges = [];
+      for (let i = 0; i < vertices.length; i += 1) {
+        for (let j = i + 1; j < vertices.length; j += 1) {
+          const dx = vertices[i][0] - vertices[j][0];
+          const dy = vertices[i][1] - vertices[j][1];
+          const dz = vertices[i][2] - vertices[j][2];
+          const d = Math.hypot(dx, dy, dz);
+          if (Math.abs(d - edgeDistance) <= tolerance) edges.push([i, j]);
+        }
+      }
+      return { vertices, edges };
+    }
+
+    const PHI = (1 + Math.sqrt(5)) / 2;
+    const PLATONIC_SOLIDS = [
+      buildSolid([
+        [1, 1, 1], [1, -1, -1], [-1, 1, -1], [-1, -1, 1]
+      ]),
+      buildSolid([
+        [-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1],
+        [-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]
+      ]),
+      buildSolid([
+        [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]
+      ]),
+      buildSolid([
+        [0, 1, PHI], [0, -1, PHI], [0, 1, -PHI], [0, -1, -PHI],
+        [1, PHI, 0], [-1, PHI, 0], [1, -PHI, 0], [-1, -PHI, 0],
+        [PHI, 0, 1], [PHI, 0, -1], [-PHI, 0, 1], [-PHI, 0, -1]
+      ])
+    ];
+
+    function morphSolidVertices(a, b, t) {
+      const maxCount = Math.max(a.vertices.length, b.vertices.length);
+      const vertices = [];
+      for (let i = 0; i < maxCount; i += 1) {
+        const av = a.vertices[i % a.vertices.length];
+        const bv = b.vertices[i % b.vertices.length];
+        vertices.push([
+          av[0] + (bv[0] - av[0]) * t,
+          av[1] + (bv[1] - av[1]) * t,
+          av[2] + (bv[2] - av[2]) * t
+        ]);
+      }
+      return vertices;
+    }
+
+    function rotate3d([x, y, z], ax, ay, az) {
+      const sx = Math.sin(ax), cx = Math.cos(ax);
+      const sy = Math.sin(ay), cy = Math.cos(ay);
+      const sz = Math.sin(az), cz = Math.cos(az);
+      let ry = y * cx - z * sx;
+      let rz = y * sx + z * cx;
+      let rx = x * cy + rz * sy;
+      rz = -x * sy + rz * cy;
+      const fx = rx * cz - ry * sz;
+      const fy = rx * sz + ry * cz;
+      return [fx, fy, rz];
+    }
+
+    function project3d([x, y, z], W, H, scale = 1) {
+      const perspective = 3.1;
+      const depth = perspective + z;
+      const zoom = (Math.min(W, H) * 0.18 * scale) / Math.max(depth, 0.8);
+      return [W / 2 + x * zoom, H / 2 + y * zoom];
+    }
+
+    function renderPlatonicWave(ctx, W, H, freq, wave, bass, mid, high, frame) {
+      ctx.save();
+      ctx.fillStyle = `rgba(5, 5, 5, 0.2)`;
+      ctx.fillRect(0, 0, W, H);
+
+      const levelMax = PLATONIC_SOLIDS.length - 1;
+      const cycle = (frame * 0.004) % (levelMax * 2);
+      const reflected = cycle <= levelMax ? cycle : (levelMax * 2) - cycle;
+      const aIdx = Math.floor(reflected);
+      const bIdx = Math.min(levelMax, aIdx + 1);
+      const morphT = reflected - aIdx;
+      const solidA = PLATONIC_SOLIDS[aIdx];
+      const solidB = PLATONIC_SOLIDS[bIdx];
+      const vertices = morphSolidVertices(solidA, solidB, morphT);
+      const edgeSet = morphT < 0.5 ? solidA.edges : solidB.edges;
+      const expansion = 1 + Math.sin(frame * 0.02) * 0.22 + bass * 0.22 + high * 0.1;
+      const ax = frame * 0.012 + mid * 0.6;
+      const ay = frame * 0.016 + bass * 0.85;
+      const az = frame * 0.008;
+      const projected = vertices.map((vertex) => project3d(rotate3d(vertex, ax, ay, az), W, H, expansion));
+      const hue = (currentVizColorHue + frame * 1.4) % 360;
+
+      ctx.beginPath();
+      for (const [i, j] of edgeSet) {
+        const a = projected[i % projected.length];
+        const b = projected[j % projected.length];
+        ctx.moveTo(a[0], a[1]);
+        ctx.lineTo(b[0], b[1]);
+      }
+      ctx.strokeStyle = `hsla(${hue}, 95%, 62%, 0.82)`;
+      ctx.lineWidth = 0.9 + bass * 0.85;
+      ctx.stroke();
+
+      ctx.beginPath();
+      for (const point of projected) {
+        ctx.moveTo(point[0] + 1, point[1]);
+        ctx.arc(point[0], point[1], 0.65 + high * 0.95, 0, Math.PI * 2);
+      }
+      ctx.strokeStyle = `hsla(${(hue + 42) % 360}, 95%, 70%, 0.55)`;
+      ctx.lineWidth = 0.45;
+      ctx.stroke();
+      ctx.restore();
     }
 
     // ── Update album art when entry changes ────────────────────────────────
