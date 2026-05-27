@@ -759,6 +759,17 @@
       align-items: center;
     }
 
+    .compose-upload-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: .5rem;
+    }
+
+    .compose-upload-row button:disabled {
+      opacity: .42;
+      cursor: not-allowed;
+    }
+
     .compose-row > * {
       min-width: 0;
     }
@@ -1164,12 +1175,14 @@
       #internalImportRow,
       #internalUnlockRow,
       .compose-attachment-row,
+      .compose-upload-row,
       .compose-send-row {
         grid-template-columns: 1fr;
       }
       #internalImportRow button,
       #internalUnlockRow button,
       .compose-attachment-row button,
+      .compose-upload-row button,
       .compose-send-row button {
         width: 100%;
       }
@@ -1303,9 +1316,16 @@
           <input id="attachmentInput" type="text" placeholder="Attachment URL or IPFS:CID/audio.mp3" />
           <button type="button" id="addAttachmentBtn">Add</button>
         </div>
+        <div class="compose-row compose-upload-row">
+          <button type="button" id="uploadAudioBtn">⬆ Upload Audio</button>
+          <button type="button" id="uploadImageBtn" disabled>🖼 Upload Image</button>
+          <input type="file" id="uploadAudioFile" accept="audio/*,.mp3,.ogg,.wav,.flac,.m4a,.aac,.opus,.weba,.oga" class="sr-only" aria-hidden="true" tabindex="-1" />
+          <input type="file" id="uploadImageFile" accept="image/*,.png,.jpg,.jpeg,.gif,.webp,.avif" class="sr-only" aria-hidden="true" tabindex="-1" />
+        </div>
         <div class="compose-preview" id="composePreview" aria-live="polite">
           <b>Audio preview</b>
           <audio id="composePreviewAudio" controls preload="metadata"></audio>
+          <img id="composePreviewImage" alt="Image preview" style="display:none;max-width:100%;max-height:140px;border-radius:.44rem;object-fit:contain;margin-top:.3rem;" />
         </div>
         <ul class="attachment-list" id="attachmentList"></ul>
         <div class="compose-row compose-send-row">
@@ -1364,8 +1384,13 @@
       postMessage: document.getElementById('postMessage'),
       attachmentInput: document.getElementById('attachmentInput'),
       addAttachmentBtn: document.getElementById('addAttachmentBtn'),
+      uploadAudioBtn: document.getElementById('uploadAudioBtn'),
+      uploadImageBtn: document.getElementById('uploadImageBtn'),
+      uploadAudioFile: document.getElementById('uploadAudioFile'),
+      uploadImageFile: document.getElementById('uploadImageFile'),
       composePreview: document.getElementById('composePreview'),
       composePreviewAudio: document.getElementById('composePreviewAudio'),
+      composePreviewImage: document.getElementById('composePreviewImage'),
       attachmentList: document.getElementById('attachmentList'),
       sendEstimate: document.getElementById('sendEstimate'),
       sendPostBtn: document.getElementById('sendPostBtn'),
@@ -1892,6 +1917,7 @@
     const COMPOSER_CID_REGEX = /(Qm[1-9A-HJ-NP-Za-km-z]{44}|bafy[0-9a-z]{40,})/;
     const UNSAFE_FILENAME_CHARS_REGEX = /[<>:"/\\|?*\u0000-\u001f]/g;
     const AUDIO_FILE_EXTENSION_REGEX = /\.(mp3|ogg|wav|flac|m4a|aac|opus|weba|oga)$/i;
+    const IMAGE_FILE_EXTENSION_REGEX = /\.(png|jpe?g|gif|webp|avif)$/i;
     const IPFS_PATH_URL_REGEX = /\/ipfs\/([^/?#]+)(?:\/([^?#]+))?/i;
     const IPFS_VIDEO_PROBE_TIMEOUT_MS = 11000;
     const BTC_DECIMAL_PRECISION = 8;
@@ -3072,9 +3098,19 @@
         removeBtn.type = 'button';
         removeBtn.textContent = 'Remove';
         removeBtn.addEventListener('click', () => {
+          const wasAudio = AUDIO_FILE_EXTENSION_REGEX.test(attachment);
+          const wasImage = IMAGE_FILE_EXTENSION_REGEX.test(attachment);
           composerAttachments = composerAttachments.filter((item) => item !== attachment);
+          if (wasAudio) {
+            // Removing audio also removes any image (image requires audio)
+            composerAttachments = composerAttachments.filter((item) => !IMAGE_FILE_EXTENSION_REGEX.test(item));
+            clearComposerPreview();
+          } else if (wasImage) {
+            if (dom.composePreviewImage) { dom.composePreviewImage.style.display = 'none'; dom.composePreviewImage.src = ''; }
+          }
           if (!composerAttachments.length) clearComposerPreview();
           renderComposerAttachments();
+          syncUploadImageBtnState();
           queueComposerSendEstimateRefresh();
         });
         li.appendChild(label);
@@ -3086,6 +3122,11 @@
     function addComposerAttachment(value) {
       const token = cleanDisplayText(normalize(value), 260);
       if (!token || composerAttachments.includes(token)) return false;
+      if (AUDIO_FILE_EXTENSION_REGEX.test(token) && getComposerAudioAttachment()) return false;
+      if (IMAGE_FILE_EXTENSION_REGEX.test(token)) {
+        if (!getComposerAudioAttachment()) return false;
+        if (getComposerImageAttachment()) return false;
+      }
       composerAttachments.push(token);
       renderComposerAttachments();
       queueComposerSendEstimateRefresh();
@@ -3094,6 +3135,7 @@
 
     function clearComposerPreview() {
       composerPreviewUrl = '';
+      if (dom.composePreviewImage) { dom.composePreviewImage.style.display = 'none'; dom.composePreviewImage.src = ''; }
       if (!dom.composePreview || !dom.composePreviewAudio) return;
       dom.composePreview.classList.remove('visible');
       dom.composePreviewAudio.removeAttribute('src');
@@ -3203,6 +3245,139 @@
         return { urn: `IPFS:${parsed.cid}/${filename}`, previewUrl: candidateUrl };
       }
       throw new Error('Could not find a playable IPFS audio at that link');
+    }
+
+    function sanitizeUploadFileName(name) {
+      const base = normalize(String(name || '')).replace(/[\\/]+/g, '_').replace(/\s+/g, '_');
+      const safe = base.split('.').map((part) => part.replace(UNSAFE_FILENAME_CHARS_REGEX, '')).filter(Boolean).join('.');
+      if (!safe) throw new Error('Upload needs a valid file name');
+      return safe.slice(0, 120);
+    }
+
+    function extractUploadCid(payload) {
+      const read = (v) => {
+        const t = normalize(String(v || ''));
+        if (!t) return '';
+        if (COMPOSER_CID_REGEX.test(t)) return t.match(COMPOSER_CID_REGEX)?.[1] || '';
+        const m = t.match(/(Qm[1-9A-HJ-NP-Za-km-z]{44}|bafy[0-9a-z]{40,})/i);
+        return m?.[1] || '';
+      };
+      if (typeof payload === 'string') return read(payload);
+      if (payload && typeof payload === 'object') {
+        const direct = [
+          payload.cid, payload.CID, payload.hash, payload.Hash,
+          payload.ipfs, payload.ipfsCid, payload.IpfsHash,
+          payload?.data?.cid, payload?.result?.cid, payload?.payload?.cid
+        ];
+        for (const v of direct) { const c = read(v); if (c) return c; }
+        return read(JSON.stringify(payload));
+      }
+      return '';
+    }
+
+    async function waitForIpfsPreview(cid, path = '', tries = 8, gapMs = 2500) {
+      const checkUrl = buildIpfsPathUrl(cid, path, 0);
+      for (let i = 0; i < tries; i += 1) {
+        try {
+          const r = await fetch(checkUrl, { method: 'HEAD', cache: 'no-store' });
+          if (r.ok) return true;
+        } catch { /* continue */ }
+        if (i < tries - 1) await delay(gapMs);
+      }
+      return false;
+    }
+
+    function getComposerAudioAttachment() {
+      return composerAttachments.find((a) => AUDIO_FILE_EXTENSION_REGEX.test(a)) || null;
+    }
+
+    function getComposerImageAttachment() {
+      return composerAttachments.find((a) => IMAGE_FILE_EXTENSION_REGEX.test(a)) || null;
+    }
+
+    function syncUploadImageBtnState() {
+      if (!dom.uploadImageBtn) return;
+      dom.uploadImageBtn.disabled = !getComposerAudioAttachment();
+    }
+
+    async function uploadFileToIpfs(file, expectedExtensionRegex, typeLabel) {
+      let fileName = '';
+      try {
+        fileName = sanitizeUploadFileName(file?.name || '');
+      } catch (e) {
+        throw new Error(e?.message || 'Invalid filename');
+      }
+      if (!expectedExtensionRegex.test(fileName)) {
+        throw new Error(`Please choose a ${typeLabel} file`);
+      }
+      setComposeStatus(`Uploading ${fileName} to p2fk.io…`);
+      const fd = new FormData();
+      fd.append('file', file, fileName);
+      const r = await fetch(`${P2FK_BASE_URL}/ipfs`, { method: 'POST', body: fd });
+      if (!r.ok) throw new Error(`Upload failed (${r.status})`);
+      const raw = await r.text();
+      let payload = raw;
+      try { payload = JSON.parse(raw); } catch { /* raw text fallback */ }
+      const cid = extractUploadCid(payload);
+      if (!COMPOSER_CID_REGEX.test(cid)) throw new Error('Upload succeeded but no valid CID was returned');
+      return { cid, fileName };
+    }
+
+    async function onUploadAudioFile() {
+      const fileInp = dom.uploadAudioFile;
+      if (!fileInp?.files?.length) return;
+      const file = fileInp.files[0];
+      fileInp.value = '';
+      if (getComposerAudioAttachment()) {
+        setComposeStatus('Remove the existing audio attachment before uploading a new one');
+        return;
+      }
+      if (dom.uploadAudioBtn) dom.uploadAudioBtn.disabled = true;
+      try {
+        const { cid, fileName } = await uploadFileToIpfs(file, AUDIO_FILE_EXTENSION_REGEX, 'audio');
+        const canonical = `IPFS:${cid}/${fileName}`;
+        addComposerAttachment(canonical);
+        setComposerPreview(buildIpfsPathUrl(cid, fileName, 0));
+        syncUploadImageBtnState();
+        setComposeStatus('Uploaded and pinned for 1 hour. Preview may take time to appear—please wait before posting.');
+        const previewReady = await waitForIpfsPreview(cid, fileName);
+        if (previewReady) setComposeStatus(`Preview ready · Attached: ${canonical.slice(0, 80)}`);
+      } catch (e) {
+        setComposeStatus(e?.message || 'Audio upload failed');
+      } finally {
+        if (dom.uploadAudioBtn) dom.uploadAudioBtn.disabled = false;
+      }
+    }
+
+    async function onUploadImageFile() {
+      const fileInp = dom.uploadImageFile;
+      if (!fileInp?.files?.length) return;
+      const file = fileInp.files[0];
+      fileInp.value = '';
+      if (!getComposerAudioAttachment()) {
+        setComposeStatus('Add an audio attachment before uploading an image');
+        return;
+      }
+      if (getComposerImageAttachment()) {
+        setComposeStatus('Remove the existing image attachment before uploading a new one');
+        return;
+      }
+      if (dom.uploadImageBtn) dom.uploadImageBtn.disabled = true;
+      try {
+        const { cid, fileName } = await uploadFileToIpfs(file, IMAGE_FILE_EXTENSION_REGEX, 'image');
+        const canonical = `IPFS:${cid}/${fileName}`;
+        addComposerAttachment(canonical);
+        if (dom.composePreviewImage) {
+          dom.composePreviewImage.src = buildIpfsPathUrl(cid, fileName, 0);
+          dom.composePreviewImage.style.display = '';
+          if (dom.composePreview) dom.composePreview.classList.add('visible');
+        }
+        setComposeStatus('Image uploaded and pinned for 1 hour · Attached: ' + canonical.slice(0, 80));
+      } catch (e) {
+        setComposeStatus(e?.message || 'Image upload failed');
+      } finally {
+        syncUploadImageBtnState();
+      }
     }
 
     function buildP2fkUnsignedObject(messageText, attachments) {
@@ -3761,11 +3936,16 @@
         setComposeStatus('Enter an IPFS attachment URL/URN first');
         return;
       }
+      if (getComposerAudioAttachment()) {
+        setComposeStatus('Only one audio attachment allowed. Remove the existing one first');
+        return;
+      }
       setComposeStatus('Checking IPFS audio link…');
       try {
         const normalized = await verifyAndNormalizeIpfsAudioInput(value);
         const added = addComposerAttachment(normalized.urn);
         setComposerPreview(normalized.previewUrl);
+        syncUploadImageBtnState();
         dom.attachmentInput.value = '';
         queueComposerSendEstimateRefresh();
         setComposeStatus(added ? `Attached ${normalized.urn}` : 'Attachment already added');
@@ -3900,6 +4080,7 @@
         composerAttachments = [];
         renderComposerAttachments();
         clearComposerPreview();
+        syncUploadImageBtnState();
         queueComposerSendEstimateRefresh();
       } catch (error) {
         setComposeStatus(error?.message || 'Unable to send post');
@@ -5726,6 +5907,14 @@
       dom.addAttachmentBtn.addEventListener('click', onAddAttachment);
       dom.sendPostBtn.addEventListener('click', onSendPost);
       dom.postMessage.addEventListener('input', queueComposerSendEstimateRefresh);
+      if (dom.uploadAudioBtn) {
+        dom.uploadAudioBtn.addEventListener('click', () => { if (dom.uploadAudioFile) dom.uploadAudioFile.click(); });
+      }
+      if (dom.uploadImageBtn) {
+        dom.uploadImageBtn.addEventListener('click', () => { if (dom.uploadImageFile) dom.uploadImageFile.click(); });
+      }
+      if (dom.uploadAudioFile) dom.uploadAudioFile.addEventListener('change', onUploadAudioFile);
+      if (dom.uploadImageFile) dom.uploadImageFile.addEventListener('change', onUploadImageFile);
       if (dom.composeProfileAvatar) {
         dom.composeProfileAvatar.addEventListener('load', () => {
           dom.composeProfileAvatar.classList.add('visible');
