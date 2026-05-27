@@ -1444,6 +1444,7 @@
     const READY_RANGE_START_ALLOWANCE_SECONDS = 0.75;
     const FULLY_BUFFERED_EPSILON_SECONDS = 0.35;
     const MESSAGE_ROTATION_INTERVAL_MS = 13500;
+    const COMPOSER_PREVIEW_RETRY_DELAY_MS = 15000;
     const HUD_IDLE_HIDE_MS = 2800;
     const FULLSCREEN_ACTIVATION_DELAY_MS = 120;
     const MOUSE_SHOW_DISTANCE_PX = 48;
@@ -1543,6 +1544,11 @@
     let composePanelOpen = false;
     let composerAttachments = [];
     let composerPreviewUrl = '';
+    let composerImagePreviewUrl = '';
+    let composerAudioPreviewRetryTimerId = null;
+    let composerAudioPreviewRetriedUrl = '';
+    let composerImagePreviewRetryTimerId = null;
+    let composerImagePreviewRetriedUrl = '';
     let walletSession = { providerId: '', provider: null, address: '' };
     let internalPrivKeyBytes = null;
     let walletSettingsOpen = false;
@@ -3106,7 +3112,7 @@
             composerAttachments = composerAttachments.filter((item) => !IMAGE_FILE_EXTENSION_REGEX.test(item));
             clearComposerPreview();
           } else if (wasImage) {
-            if (dom.composePreviewImage) { dom.composePreviewImage.style.display = 'none'; dom.composePreviewImage.src = ''; }
+            setComposerImagePreview('');
           }
           if (!composerAttachments.length) clearComposerPreview();
           renderComposerAttachments();
@@ -3135,6 +3141,17 @@
 
     function clearComposerPreview() {
       composerPreviewUrl = '';
+      composerImagePreviewUrl = '';
+      if (composerAudioPreviewRetryTimerId !== null) {
+        clearTimeout(composerAudioPreviewRetryTimerId);
+        composerAudioPreviewRetryTimerId = null;
+      }
+      composerAudioPreviewRetriedUrl = '';
+      if (composerImagePreviewRetryTimerId !== null) {
+        clearTimeout(composerImagePreviewRetryTimerId);
+        composerImagePreviewRetryTimerId = null;
+      }
+      composerImagePreviewRetriedUrl = '';
       if (dom.composePreviewImage) { dom.composePreviewImage.style.display = 'none'; dom.composePreviewImage.src = ''; }
       if (!dom.composePreview || !dom.composePreviewAudio) return;
       dom.composePreview.classList.remove('visible');
@@ -3144,10 +3161,33 @@
 
     function setComposerPreview(url) {
       composerPreviewUrl = normalize(url);
+      if (composerAudioPreviewRetryTimerId !== null) {
+        clearTimeout(composerAudioPreviewRetryTimerId);
+        composerAudioPreviewRetryTimerId = null;
+      }
+      composerAudioPreviewRetriedUrl = '';
       if (!dom.composePreview || !dom.composePreviewAudio || !composerPreviewUrl) return;
       dom.composePreview.classList.add('visible');
       dom.composePreviewAudio.src = composerPreviewUrl;
       dom.composePreviewAudio.load();
+    }
+
+    function setComposerImagePreview(url) {
+      composerImagePreviewUrl = normalize(url);
+      if (composerImagePreviewRetryTimerId !== null) {
+        clearTimeout(composerImagePreviewRetryTimerId);
+        composerImagePreviewRetryTimerId = null;
+      }
+      composerImagePreviewRetriedUrl = '';
+      if (!dom.composePreviewImage) return;
+      if (!composerImagePreviewUrl) {
+        dom.composePreviewImage.style.display = 'none';
+        dom.composePreviewImage.src = '';
+        return;
+      }
+      dom.composePreviewImage.src = composerImagePreviewUrl;
+      dom.composePreviewImage.style.display = '';
+      if (dom.composePreview) dom.composePreview.classList.add('visible');
     }
 
     function extractIpfsPartsFromInput(value) {
@@ -3366,11 +3406,7 @@
         const { cid, fileName } = await uploadFileToIpfs(file, IMAGE_FILE_EXTENSION_REGEX, 'image');
         const canonical = `IPFS:${cid}/${fileName}`;
         addComposerAttachment(canonical);
-        if (dom.composePreviewImage) {
-          dom.composePreviewImage.src = buildIpfsPathUrl(cid, fileName, 0);
-          dom.composePreviewImage.style.display = '';
-          if (dom.composePreview) dom.composePreview.classList.add('visible');
-        }
+        setComposerImagePreview(buildIpfsPathUrl(cid, fileName, 0));
         setComposeStatus(`Image uploaded and pinned for 1 hour · Attached: ${canonical.slice(0, 80)}`);
       } catch (e) {
         setComposeStatus(e?.message || 'Image upload failed');
@@ -5914,6 +5950,47 @@
       }
       if (dom.uploadAudioFile) dom.uploadAudioFile.addEventListener('change', onUploadAudioFile);
       if (dom.uploadImageFile) dom.uploadImageFile.addEventListener('change', onUploadImageFile);
+      if (dom.composePreviewAudio) {
+        dom.composePreviewAudio.addEventListener('error', () => {
+          const activeUrl = normalize(dom.composePreviewAudio.currentSrc || dom.composePreviewAudio.src || composerPreviewUrl);
+          if (!activeUrl || composerAudioPreviewRetriedUrl === activeUrl) return;
+          composerAudioPreviewRetriedUrl = activeUrl;
+          if (composerAudioPreviewRetryTimerId !== null) clearTimeout(composerAudioPreviewRetryTimerId);
+          composerAudioPreviewRetryTimerId = window.setTimeout(() => {
+            composerAudioPreviewRetryTimerId = null;
+            if (!dom.composePreviewAudio) return;
+            const latestUrl = normalize(dom.composePreviewAudio.currentSrc || dom.composePreviewAudio.src || composerPreviewUrl);
+            if (!latestUrl || latestUrl !== activeUrl) return;
+            dom.composePreviewAudio.load();
+          }, COMPOSER_PREVIEW_RETRY_DELAY_MS);
+        });
+        dom.composePreviewAudio.addEventListener('canplay', () => {
+          if (composerAudioPreviewRetryTimerId !== null) {
+            clearTimeout(composerAudioPreviewRetryTimerId);
+            composerAudioPreviewRetryTimerId = null;
+          }
+        });
+      }
+      if (dom.composePreviewImage) {
+        dom.composePreviewImage.addEventListener('error', () => {
+          const activeUrl = composerImagePreviewUrl;
+          if (!activeUrl || composerImagePreviewRetriedUrl === activeUrl) return;
+          composerImagePreviewRetriedUrl = activeUrl;
+          if (composerImagePreviewRetryTimerId !== null) clearTimeout(composerImagePreviewRetryTimerId);
+          composerImagePreviewRetryTimerId = window.setTimeout(() => {
+            composerImagePreviewRetryTimerId = null;
+            if (!dom.composePreviewImage || composerImagePreviewUrl !== activeUrl) return;
+            const joiner = activeUrl.includes('?') ? '&' : '?';
+            dom.composePreviewImage.src = `${activeUrl}${joiner}retry=${Date.now()}`;
+          }, COMPOSER_PREVIEW_RETRY_DELAY_MS);
+        });
+        dom.composePreviewImage.addEventListener('load', () => {
+          if (composerImagePreviewRetryTimerId !== null) {
+            clearTimeout(composerImagePreviewRetryTimerId);
+            composerImagePreviewRetryTimerId = null;
+          }
+        });
+      }
       if (dom.composeProfileAvatar) {
         dom.composeProfileAvatar.addEventListener('load', () => {
           dom.composeProfileAvatar.classList.add('visible');
