@@ -1319,8 +1319,8 @@
         <div class="compose-row compose-upload-row">
           <button type="button" id="uploadAudioBtn">⬆ Upload Audio</button>
           <button type="button" id="uploadImageBtn" disabled>🖼 Upload Image</button>
-          <input type="file" id="uploadAudioFile" accept="audio/*,.mp3,.ogg,.wav,.flac,.m4a,.aac,.opus,.weba,.oga" class="sr-only" aria-hidden="true" tabindex="-1" />
-          <input type="file" id="uploadImageFile" accept="image/*,.png,.jpg,.jpeg,.gif,.webp,.avif" class="sr-only" aria-hidden="true" tabindex="-1" />
+          <input type="file" id="uploadAudioFile" accept="audio/*,.mp3,.ogg,.wav,.flac,.m4a,.aac,.opus,.weba,.oga" class="sr-only" tabindex="-1" />
+          <input type="file" id="uploadImageFile" accept="image/*,.png,.jpg,.jpeg,.gif,.webp,.avif" class="sr-only" tabindex="-1" />
         </div>
         <div class="compose-preview" id="composePreview" aria-live="polite">
           <b>Audio preview</b>
@@ -3258,8 +3258,7 @@
       const read = (v) => {
         const t = normalize(String(v || ''));
         if (!t) return '';
-        if (COMPOSER_CID_REGEX.test(t)) return t.match(COMPOSER_CID_REGEX)?.[1] || '';
-        const m = t.match(/(Qm[1-9A-HJ-NP-Za-km-z]{44}|bafy[0-9a-z]{40,})/i);
+        const m = t.match(COMPOSER_CID_REGEX);
         return m?.[1] || '';
       };
       if (typeof payload === 'string') return read(payload);
@@ -3267,7 +3266,7 @@
         const direct = [
           payload.cid, payload.CID, payload.hash, payload.Hash,
           payload.ipfs, payload.ipfsCid, payload.IpfsHash,
-          payload?.data?.cid, payload?.result?.cid, payload?.payload?.cid
+          payload.data?.cid, payload.result?.cid, payload.payload?.cid
         ];
         for (const v of direct) { const c = read(v); if (c) return c; }
         return read(JSON.stringify(payload));
@@ -3372,7 +3371,7 @@
           dom.composePreviewImage.style.display = '';
           if (dom.composePreview) dom.composePreview.classList.add('visible');
         }
-        setComposeStatus('Image uploaded and pinned for 1 hour · Attached: ' + canonical.slice(0, 80));
+        setComposeStatus(`Image uploaded and pinned for 1 hour · Attached: ${canonical.slice(0, 80)}`);
       } catch (e) {
         setComposeStatus(e?.message || 'Image upload failed');
       } finally {
