@@ -1549,6 +1549,7 @@
     let composerAudioPreviewRetriedUrl = '';
     let composerImagePreviewRetryTimerId = null;
     let composerImagePreviewRetriedUrl = '';
+    let composerImagePreviewRetryNonce = 0;
     let walletSession = { providerId: '', provider: null, address: '' };
     let internalPrivKeyBytes = null;
     let walletSettingsOpen = false;
@@ -3152,6 +3153,7 @@
         composerImagePreviewRetryTimerId = null;
       }
       composerImagePreviewRetriedUrl = '';
+      composerImagePreviewRetryNonce = 0;
       if (dom.composePreviewImage) { dom.composePreviewImage.style.display = 'none'; dom.composePreviewImage.src = ''; }
       if (!dom.composePreview || !dom.composePreviewAudio) return;
       dom.composePreview.classList.remove('visible');
@@ -3179,6 +3181,7 @@
         composerImagePreviewRetryTimerId = null;
       }
       composerImagePreviewRetriedUrl = '';
+      composerImagePreviewRetryNonce = 0;
       if (!dom.composePreviewImage) return;
       if (!composerImagePreviewUrl) {
         dom.composePreviewImage.style.display = 'none';
@@ -5980,8 +5983,9 @@
           composerImagePreviewRetryTimerId = window.setTimeout(() => {
             composerImagePreviewRetryTimerId = null;
             if (!dom.composePreviewImage || composerImagePreviewUrl !== activeUrl) return;
+            composerImagePreviewRetryNonce += 1;
             const joiner = activeUrl.includes('?') ? '&' : '?';
-            dom.composePreviewImage.src = `${activeUrl}${joiner}retry=${Date.now()}`;
+            dom.composePreviewImage.src = `${activeUrl}${joiner}retry=${composerImagePreviewRetryNonce}`;
           }, COMPOSER_PREVIEW_RETRY_DELAY_MS);
         });
         dom.composePreviewImage.addEventListener('load', () => {
