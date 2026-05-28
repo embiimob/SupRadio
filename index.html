@@ -1579,8 +1579,9 @@
           timerId = setTimeout(processQueue, Math.max(0, windowMs - (now - timestamps[0])));
         }
       };
-      return () => new Promise(resolve => {
-        queue.push(resolve);
+      return (priority = false) => new Promise(resolve => {
+        if (priority) queue.unshift(resolve);
+        else queue.push(resolve);
         processQueue();
       });
     };
@@ -1593,8 +1594,10 @@
       ...fetchOptions
     } = {}) {
       let lastError = null;
+      const priority = fetchOptions.priority || false;
+      delete fetchOptions.priority;
       for (let attempt = 1; attempt <= attempts; attempt += 1) {
-        if (endpoint.startsWith(P2FK_BASE_URL)) await p2fkRateLimiter();
+        if (endpoint.startsWith(P2FK_BASE_URL)) await p2fkRateLimiter(priority);
         const controller = new AbortController();
         const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
         try {
@@ -4526,49 +4529,49 @@
       }
     }
 
-    async function getPublicAddressByKeyword(keyword) {
+    async function getPublicAddressByKeyword(keyword, priority = false) {
       const endpoint = `${P2FK_BASE_URL}/GetPublicAddressByKeyword/${encodeURIComponent(keyword)}?mainnet=${USE_P2FK_MAINNET}`;
-      const payload = normalize(await fetchWithTimeout(endpoint, { responseType: 'text' })).replace(/^"|"$/g, '');
+      const payload = normalize(await fetchWithTimeout(endpoint, { responseType: 'text', priority })).replace(/^"|"$/g, '');
       if (!payload) throw new Error('keyword address not found');
       return payload;
     }
 
-    async function getPublicMessagesByAddress(address, skip = 0, qty = 200, timeoutMs = P2FK_FETCH_TIMEOUT_MS) {
+    async function getPublicMessagesByAddress(address, skip = 0, qty = 200, timeoutMs = P2FK_FETCH_TIMEOUT_MS, priority = false) {
       const endpoint = `${P2FK_BASE_URL}/GetPublicMessagesByAddress/${encodeURIComponent(address)}?skip=${skip}&qty=${qty}&mainnet=${USE_P2FK_MAINNET}`;
-      const payload = await fetchWithTimeout(endpoint, { timeoutMs });
+      const payload = await fetchWithTimeout(endpoint, { timeoutMs, priority });
       return asArray(payload);
     }
 
-    async function getKnownRootsBySearchString(searchString, skip = 0, qty = 200, timeoutMs = P2FK_FETCH_TIMEOUT_MS) {
+    async function getKnownRootsBySearchString(searchString, skip = 0, qty = 200, timeoutMs = P2FK_FETCH_TIMEOUT_MS, priority = false) {
       const endpoint = `${P2FK_BASE_URL}/GetKnownRootsBySearchString?searchString=${encodeURIComponent(searchString)}&skip=${skip}&qty=${qty}&mainnet=${USE_P2FK_MAINNET}&showSystemFiles=false`;
-      const payload = await fetchWithTimeout(endpoint, { timeoutMs });
+      const payload = await fetchWithTimeout(endpoint, { timeoutMs, priority });
       return asArray(payload);
     }
 
-    async function getKnownRootsBySearchStringWithTimeout(searchString, skip = 0, qty = 200, timeoutMs = TRENDING_KEYWORD_FETCH_TIMEOUT_MS) {
-      return getKnownRootsBySearchString(searchString, skip, qty, timeoutMs);
+    async function getKnownRootsBySearchStringWithTimeout(searchString, skip = 0, qty = 200, timeoutMs = TRENDING_KEYWORD_FETCH_TIMEOUT_MS, priority = false) {
+      return getKnownRootsBySearchString(searchString, skip, qty, timeoutMs, priority);
     }
 
-    async function getKeywordChannelMessages(keyword, timeoutMs = P2FK_FETCH_TIMEOUT_MS) {
-      const address = await getPublicAddressByKeyword(keyword);
-      return getPublicMessagesByAddress(address, 0, 200, timeoutMs);
+    async function getKeywordChannelMessages(keyword, timeoutMs = P2FK_FETCH_TIMEOUT_MS, priority = false) {
+      const address = await getPublicAddressByKeyword(keyword, priority);
+      return getPublicMessagesByAddress(address, 0, 200, timeoutMs, priority);
     }
 
-    async function fetchTrendingKeywordMessages(keyword) {
+    async function fetchTrendingKeywordMessages(keyword, fetchQty = TRENDING_SEARCH_QTY, priority = false) {
       const [searchRaw, channelRaw] = await Promise.all([
-        getKnownRootsBySearchStringWithTimeout(keyword, 0, TRENDING_SEARCH_QTY).then(asArray).catch(() => []),
+        getKnownRootsBySearchStringWithTimeout(keyword, 0, fetchQty, TRENDING_KEYWORD_FETCH_TIMEOUT_MS, priority).then(asArray).catch(() => []),
         Promise.race([
-          getKeywordChannelMessages(keyword),
+          getKeywordChannelMessages(keyword, TRENDING_KEYWORD_FETCH_TIMEOUT_MS, priority),
           new Promise((resolve) => setTimeout(() => resolve([]), TRENDING_KEYWORD_FETCH_TIMEOUT_MS))
         ]).catch(() => [])
       ]);
       return mergeUniqueMessagesByTxid(channelRaw, searchRaw);
     }
 
-    async function queryP2FK(keyword, { maxSearchQty = STANDARD_SEARCH_QTY, timeoutMs = P2FK_FETCH_TIMEOUT_MS } = {}) {
+    async function queryP2FK(keyword, { maxSearchQty = STANDARD_SEARCH_QTY, timeoutMs = P2FK_FETCH_TIMEOUT_MS, priority = true } = {}) {
       const [keywordChannelResult, mainSearchResult] = await Promise.allSettled([
-        getKeywordChannelMessages(keyword, timeoutMs),
-        getKnownRootsSearchWindow(keyword, maxSearchQty, timeoutMs)
+        getKeywordChannelMessages(keyword, timeoutMs, priority),
+        getKnownRootsSearchWindow(keyword, maxSearchQty, timeoutMs, priority)
       ]);
       const keywordMessages = keywordChannelResult.status === 'fulfilled' ? keywordChannelResult.value : [];
       const mainSearchMessages = mainSearchResult.status === 'fulfilled' ? mainSearchResult.value : [];
@@ -4605,7 +4608,7 @@
 
     async function getTrendingKeywords(limit = TRENDING_KEYWORD_LIMIT) {
       try {
-        await p2fkRateLimiter();
+        await p2fkRateLimiter(true);
         const response = await fetch(TRENDING_SEARCHES_ENDPOINT, { cache: 'no-store' });
         if (!response.ok) {
           trendingStatsRows = [];
@@ -4654,14 +4657,14 @@
     }
 
 
-    async function getKnownRootsSearchWindow(searchString, maxSearchQty = STANDARD_SEARCH_QTY, timeoutMs = P2FK_FETCH_TIMEOUT_MS) {
+    async function getKnownRootsSearchWindow(searchString, maxSearchQty = STANDARD_SEARCH_QTY, timeoutMs = P2FK_FETCH_TIMEOUT_MS, priority = false) {
       const STANDARD_SEARCH_PAGE_SIZE = 25;
       const messages = [];
       let skip = 0;
       while (skip < maxSearchQty) {
         const remaining = maxSearchQty - skip;
         const qty = Math.min(STANDARD_SEARCH_PAGE_SIZE, remaining);
-        const page = await getKnownRootsBySearchString(searchString, skip, qty, timeoutMs);
+        const page = await getKnownRootsBySearchString(searchString, skip, qty, timeoutMs, priority);
         const pageRows = asArray(page);
         if (!pageRows.length) break;
         messages.push(...pageRows);
@@ -4708,7 +4711,8 @@
       const runKeywordWorker = async () => {
         while (nextKeywordIdx < keywords.length) {
           const idx = nextKeywordIdx++;
-          const raw = await fetchTrendingKeywordMessages(keywords[idx]).catch(() => []);
+          const isFirst = idx === 0;
+          const raw = await fetchTrendingKeywordMessages(keywords[idx], 25, isFirst).catch(() => []);
           deferred[idx].resolve(raw);
         }
       };
@@ -4793,7 +4797,8 @@
       const runKeywordWorker = async () => {
         while (nextKeywordIdx < keywords.length) {
           const idx = nextKeywordIdx++;
-          const raw = await fetchTrendingKeywordMessages(keywords[idx]).catch(() => []);
+          const isFirst = idx === 0;
+          const raw = await fetchTrendingKeywordMessages(keywords[idx], 25, isFirst).catch(() => []);
           deferred[idx].resolve(raw);
         }
       };
