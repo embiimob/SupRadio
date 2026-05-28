@@ -1434,7 +1434,7 @@
     const P2FK_FETCH_TIMEOUT_MS = 15000;
     const P2FK_FETCH_RETRY_ATTEMPTS = 2;
     const SEARCH_RECOVERY_RETRY_QTY = 120;
-    const TRENDING_KEYWORD_FETCH_CONCURRENCY = 4;
+    const TRENDING_KEYWORD_FETCH_CONCURRENCY = 1;
     const PRELOAD_COUNT = 5;
     const TICKER_SCROLL_SPEED_PX_PER_SECOND = 44;
     const MS_PER_SECOND = 1000;
@@ -1562,6 +1562,30 @@
 
     const normalize = (value) => (typeof value === 'string' ? value.trim() : '');
     const delay = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+    const createRateLimiter = (limit, windowMs) => {
+      let timestamps = [];
+      let queue = [];
+      let timerId = null;
+      const processQueue = () => {
+        timerId = null;
+        const now = Date.now();
+        timestamps = timestamps.filter(t => now - t < windowMs);
+        while (queue.length > 0 && timestamps.length < limit) {
+          timestamps.push(now);
+          queue.shift()();
+        }
+        if (queue.length > 0 && !timerId) {
+          timerId = setTimeout(processQueue, Math.max(0, windowMs - (now - timestamps[0])));
+        }
+      };
+      return () => new Promise(resolve => {
+        queue.push(resolve);
+        processQueue();
+      });
+    };
+    const p2fkRateLimiter = createRateLimiter(45, 10000);
+
     async function fetchWithTimeout(endpoint, {
       timeoutMs = P2FK_FETCH_TIMEOUT_MS,
       attempts = P2FK_FETCH_RETRY_ATTEMPTS,
@@ -1570,6 +1594,7 @@
     } = {}) {
       let lastError = null;
       for (let attempt = 1; attempt <= attempts; attempt += 1) {
+        if (endpoint.startsWith(P2FK_BASE_URL)) await p2fkRateLimiter();
         const controller = new AbortController();
         const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
         try {
@@ -3595,6 +3620,7 @@
       const lookup = (async () => {
         try {
           const endpoint = `${P2FK_BASE_URL}/GetProfileByAddress/${encodeURIComponent(cleanAddress)}?mainnet=${USE_P2FK_MAINNET}`;
+          await p2fkRateLimiter();
           const response = await fetch(endpoint);
           if (!response.ok) return null;
           return await response.json();
@@ -3613,6 +3639,7 @@
       const lookup = (async () => {
         try {
           const endpoint = `${P2FK_BASE_URL}/GetProfileByURN/${encodeURIComponent(cleanUrn)}?mainnet=${USE_P2FK_MAINNET}`;
+          await p2fkRateLimiter();
           const response = await fetch(endpoint);
           if (!response.ok) return null;
           return await response.json();
@@ -4578,6 +4605,7 @@
 
     async function getTrendingKeywords(limit = TRENDING_KEYWORD_LIMIT) {
       try {
+        await p2fkRateLimiter();
         const response = await fetch(TRENDING_SEARCHES_ENDPOINT, { cache: 'no-store' });
         if (!response.ok) {
           trendingStatsRows = [];
