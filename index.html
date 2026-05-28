@@ -1415,8 +1415,17 @@
     };
 
     const DEFAULT_KEYWORD = 'mp3';
-    const P2FK_API_MAX_CALLS_PER_WINDOW = 40;
+    const P2FK_API_MAX_CALLS_PER_WINDOW = 10;
     const P2FK_API_WINDOW_MS = 10000;
+    // Minimum delay between consecutive p2fk API dispatches.  Spreading calls
+    // evenly across the window prevents the queue from bursting all requests
+    // in rapid succession (setTimeout 0 between each one) even though the
+    // sliding-window cap would technically allow it.
+    const P2FK_API_MIN_CALL_SPACING_MS = Math.ceil(P2FK_API_WINDOW_MS / P2FK_API_MAX_CALLS_PER_WINDOW);
+    // Maximum number of profile API requests that may be queued at once.
+    // Requests beyond this cap are dropped (return null, not cached) so that
+    // a flood of unique addresses doesn't build an unbounded backlog.
+    const P2FK_API_QUEUE_MAX = 15;
     const KEYWORD_MAX_PLAYLIST_ITEMS = 50;
     const TRENDING_MAX_PLAYLIST_ITEMS = 500;
     const TRENDING_KEYWORD_LIMIT = 20;
@@ -1645,8 +1654,10 @@
         if (p2fkApiTimestamps.length < P2FK_API_MAX_CALLS_PER_WINDOW) {
           p2fkApiTimestamps.push(now);
           p2fkApiQueue.shift()();
-          // Schedule next tick immediately to drain as fast as allowed.
-          setTimeout(tick, 0);
+          // Space calls evenly across the window instead of bursting them all
+          // back-to-back; this avoids overwhelming the server with 30+ requests
+          // fired within a few milliseconds of each other.
+          setTimeout(tick, P2FK_API_MIN_CALL_SPACING_MS);
         } else {
           // Wait until the oldest call falls out of the window.
           const waitMs = P2FK_API_WINDOW_MS - (now - p2fkApiTimestamps[0]) + 1;
@@ -3627,6 +3638,10 @@
       const cleanAddress = cleanDisplayText(address || '');
       if (!cleanAddress) return null;
       if (profileByAddressCache.has(cleanAddress)) return profileByAddressCache.get(cleanAddress);
+      // Drop the request without caching if the queue is already at capacity so
+      // the address can be retried on the next call rather than permanently
+      // caching a null that was never actually fetched.
+      if (p2fkApiQueue.length >= P2FK_API_QUEUE_MAX) return null;
       const lookup = (async () => {
         try {
           const endpoint = `${P2FK_BASE_URL}/GetProfileByAddress/${encodeURIComponent(cleanAddress)}?mainnet=${USE_P2FK_MAINNET}`;
@@ -3645,6 +3660,7 @@
       const cleanUrn = cleanDisplayText(unwrapQuotedText(urn || ''));
       if (!cleanUrn) return null;
       if (profileByUrnCache.has(cleanUrn)) return profileByUrnCache.get(cleanUrn);
+      if (p2fkApiQueue.length >= P2FK_API_QUEUE_MAX) return null;
       const lookup = (async () => {
         try {
           const endpoint = `${P2FK_BASE_URL}/GetProfileByURN/${encodeURIComponent(cleanUrn)}?mainnet=${USE_P2FK_MAINNET}`;
