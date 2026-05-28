@@ -1415,6 +1415,8 @@
     };
 
     const DEFAULT_KEYWORD = 'mp3';
+    const P2FK_API_MAX_CALLS_PER_WINDOW = 40;
+    const P2FK_API_WINDOW_MS = 10000;
     const KEYWORD_MAX_PLAYLIST_ITEMS = 50;
     const TRENDING_MAX_PLAYLIST_ITEMS = 500;
     const TRENDING_KEYWORD_LIMIT = 20;
@@ -1624,6 +1626,39 @@
       const promise = new Promise((res) => { resolve = res; });
       return { promise, resolve };
     };
+    // Sliding-window rate limiter for p2fk.io profile API calls.
+    // Allows at most P2FK_API_MAX_CALLS_PER_WINDOW calls per P2FK_API_WINDOW_MS.
+    // Excess requests are queued and dispatched as slots open up.
+    const p2fkApiTimestamps = [];
+    const p2fkApiQueue = [];
+    let p2fkApiDraining = false;
+    const drainP2fkQueue = () => {
+      if (p2fkApiDraining || !p2fkApiQueue.length) return;
+      p2fkApiDraining = true;
+      const tick = () => {
+        if (!p2fkApiQueue.length) { p2fkApiDraining = false; return; }
+        const now = Date.now();
+        // Evict timestamps outside the current window in one splice operation.
+        const firstValid = p2fkApiTimestamps.findIndex((t) => now - t < P2FK_API_WINDOW_MS);
+        if (firstValid > 0) p2fkApiTimestamps.splice(0, firstValid);
+        else if (firstValid === -1) p2fkApiTimestamps.length = 0;
+        if (p2fkApiTimestamps.length < P2FK_API_MAX_CALLS_PER_WINDOW) {
+          p2fkApiTimestamps.push(now);
+          p2fkApiQueue.shift()();
+          // Schedule next tick immediately to drain as fast as allowed.
+          setTimeout(tick, 0);
+        } else {
+          // Wait until the oldest call falls out of the window.
+          const waitMs = P2FK_API_WINDOW_MS - (now - p2fkApiTimestamps[0]) + 1;
+          setTimeout(tick, waitMs);
+        }
+      };
+      tick();
+    };
+    const p2fkRateLimitedFetch = (url, options) => new Promise((resolve, reject) => {
+      p2fkApiQueue.push(() => fetch(url, options).then(resolve).catch(reject));
+      drainP2fkQueue();
+    });
     const tickerLabel = (keyword) => `LIVE • ${keyword.toUpperCase()} • `;
     const TICKER_SECTION_SEPARATOR = ' ║ ';
     const TICKER_ITEM_SEPARATOR = ' ✦ ';
@@ -3595,7 +3630,7 @@
       const lookup = (async () => {
         try {
           const endpoint = `${P2FK_BASE_URL}/GetProfileByAddress/${encodeURIComponent(cleanAddress)}?mainnet=${USE_P2FK_MAINNET}`;
-          const response = await fetch(endpoint);
+          const response = await p2fkRateLimitedFetch(endpoint);
           if (!response.ok) return null;
           return await response.json();
         } catch {
@@ -3613,7 +3648,7 @@
       const lookup = (async () => {
         try {
           const endpoint = `${P2FK_BASE_URL}/GetProfileByURN/${encodeURIComponent(cleanUrn)}?mainnet=${USE_P2FK_MAINNET}`;
-          const response = await fetch(endpoint);
+          const response = await p2fkRateLimitedFetch(endpoint);
           if (!response.ok) return null;
           return await response.json();
         } catch {
@@ -4546,12 +4581,19 @@
       const keywordMessages = keywordChannelResult.status === 'fulfilled' ? keywordChannelResult.value : [];
       const mainSearchMessages = mainSearchResult.status === 'fulfilled' ? mainSearchResult.value : [];
       const messages = mergeUniqueMessagesByTxid(keywordMessages, mainSearchMessages);
-      const addressLabels = await resolveAddressLabels(messages);
-      const items = dedupeItemsByTxid(parseItems(messages, addressLabels));
+      // Parse items immediately with empty labels so playback starts without waiting for
+      // rate-limited profile lookups. Labels are cosmetic only (the "from" display field).
+      const items = dedupeItemsByTxid(parseItems(messages, new Map()));
       if (!items.length) {
         throw new Error('no playable audio files in keyword or search results');
       }
-      return { items, messages, addressLabels };
+      // Resolve address labels in background; update the social feed once ready.
+      resolveAddressLabels(messages).then((addressLabels) => {
+        if (!addressLabels.size) return;
+        streamCardPool = parseSocialCards(messages, addressLabels);
+        socialTimeline = streamCardPool;
+      }).catch((err) => { console.warn('Background address label resolution failed:', err); });
+      return { items, messages, addressLabels: new Map() };
     }
 
     async function queryP2FKWithRecovery(keyword) {
@@ -4774,10 +4816,11 @@
       keywordWorkers.forEach((workerPromise) => workerPromise.catch(() => {}));
 
       const firstRaw = await keywordFetches[0];
-      const firstLabels = await resolveAddressLabels(firstRaw);
+      // Parse without resolving address labels — labels are cosmetic (the "from" field)
+      // and would require extra rate-limited network requests that delay the first sound.
       // Only queue the first TRENDING_KEYWORD_BATCH_SIZE items from kw1 so the progressive
       // phase below can interleave other keywords' content before those finish playing.
-      const firstItems = dedupeItemsByTxid(parseItems(firstRaw, firstLabels)).slice(0, TRENDING_KEYWORD_BATCH_SIZE);
+      const firstItems = dedupeItemsByTxid(parseItems(firstRaw, new Map())).slice(0, TRENDING_KEYWORD_BATCH_SIZE);
 
       const displayKeyword = keywords.length === 1 && keywords[0].toLowerCase() === DEFAULT_KEYWORD.toLowerCase()
         ? DEFAULT_KEYWORD
@@ -4785,7 +4828,7 @@
 
       // Publish the partial result immediately so the cache is warm for logo-clicks
       // that arrive before the full background phase finishes.
-      const partialResult = { items: firstItems, messages: firstRaw, addressLabels: firstLabels, keywords, displayKeyword };
+      const partialResult = { items: firstItems, messages: firstRaw, addressLabels: new Map(), keywords, displayKeyword };
       trendingResultsCache = partialResult;
 
       const bgFetchId = ++trendingBackgroundFetchId;
