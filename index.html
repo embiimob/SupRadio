@@ -1414,7 +1414,7 @@
       internalGearBtn: document.getElementById('internalGearBtn')
     };
 
-    const DEFAULT_KEYWORD = 'mp3';
+    const DEFAULT_KEYWORD = '*';
     const P2FK_API_MAX_CALLS_PER_WINDOW = 10;
     const P2FK_API_WINDOW_MS = 10000;
     // Minimum delay between consecutive p2fk API dispatches.  Spreading calls
@@ -1572,6 +1572,14 @@
     let composeProfileAvatarCandidateIndex = 0;
 
     const normalize = (value) => (typeof value === 'string' ? value.trim() : '');
+    const normalizeSearchKeyword = (value, { fallbackToDefault = false } = {}) => {
+      const text = normalize(value);
+      if (!text) return fallbackToDefault ? DEFAULT_KEYWORD : '';
+      if (text === DEFAULT_KEYWORD) return DEFAULT_KEYWORD;
+      const unwrapped = text.replace(/^\*+/, '').replace(/\*+$/, '').trim();
+      if (unwrapped) return unwrapped;
+      return fallbackToDefault ? DEFAULT_KEYWORD : '';
+    };
     const delay = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
     async function fetchWithTimeout(endpoint, {
       timeoutMs = P2FK_FETCH_TIMEOUT_MS,
@@ -4013,7 +4021,7 @@
     function runSearch(keyword, { resetSessionSkips = true, setInput = true } = {}) {
       // Keep resetSessionSkips true by default so direct user-triggered searches
       // match existing explicit-search behavior and clear session skip state.
-      const searchKeyword = normalize(keyword);
+      const searchKeyword = normalizeSearchKeyword(keyword);
       if (setInput) dom.query.value = searchKeyword;
       closeBannerMenu();
       loadSearch(searchKeyword, { resetSessionSkips });
@@ -4625,7 +4633,7 @@
     }
 
     function extractSearchString(entry) {
-      return normalize(
+      return normalizeSearchKeyword(
         entry?.searchString
         || entry?.SearchString
         || entry?.keyword
@@ -5085,7 +5093,7 @@
 
     async function loadSearch(keyword, { resetSessionSkips = false } = {}) {
       const requestId = ++loadSearchRequestId;
-      const cleanedInput = normalize(keyword);
+      const cleanedInput = normalizeSearchKeyword(keyword);
       const isTrendingDefault = !cleanedInput;
       isTrendingStationMode = isTrendingDefault;
       trendingLoopRefillPromise = null;
@@ -5955,7 +5963,7 @@
 
     function bootstrap() {
       const urlQuery = new URLSearchParams(window.location.search).get('q');
-      const initial = normalize(urlQuery);
+      const initial = normalizeSearchKeyword(urlQuery);
       // Keep the input blank so the UI starts clean while using trending defaults when no ?q is provided.
       dom.query.value = '';
       populateWalletProviderOptions();
