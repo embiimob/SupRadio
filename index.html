@@ -1576,7 +1576,7 @@
       const text = normalize(value);
       if (!text) return fallbackToDefault ? DEFAULT_KEYWORD : '';
       if (text === DEFAULT_KEYWORD) return DEFAULT_KEYWORD;
-      const unwrapped = text.replace(/^\*+/, '').replace(/\*+$/, '').trim();
+      const unwrapped = text.replace(/^\*+/, '').replace(/\*+$/, '');
       if (unwrapped) return unwrapped;
       return fallbackToDefault ? DEFAULT_KEYWORD : '';
     };
