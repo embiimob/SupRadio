@@ -3721,6 +3721,11 @@
         }
       })();
       profileByAddressCache.set(cleanAddress, lookup);
+      lookup.then((result) => {
+        if (!result) profileByAddressCache.delete(cleanAddress);
+      }).catch(() => {
+        profileByAddressCache.delete(cleanAddress);
+      });
       return lookup;
     }
 
@@ -3740,6 +3745,11 @@
         }
       })();
       profileByUrnCache.set(cleanUrn, lookup);
+      lookup.then((result) => {
+        if (!result) profileByUrnCache.delete(cleanUrn);
+      }).catch(() => {
+        profileByUrnCache.delete(cleanUrn);
+      });
       return lookup;
     }
 
