@@ -2907,25 +2907,17 @@
       const changeB = keyring.changeSigners[1];
       if (!changeA || !changeB) throw new Error('Internal change-address keyring is unavailable');
 
-      setComposeStatus('Fetching UTXOs from main + derived change addresses…');
-      const utxoGroups = await Promise.all(keyring.allSigners.map(async (signer) => {
-        const utxoResp = await fetch(`${MEMPOOL_TESTNET_API}/address/${signer.address}/utxo`);
-        if (!utxoResp.ok) throw new Error(`UTXO fetch failed (${utxoResp.status}) for ${signer.label}`);
-        const list = (await utxoResp.json())
-          .filter(u => u.status?.confirmed)
-          .map((utxo) => ({ ...utxo, sourceAddress: signer.address, signer }));
-        return { signer, list };
+      setComposeStatus('Fetching balances from main + derived change addresses…');
+      const balanceGroups = await Promise.all(keyring.allSigners.map(async (signer) => {
+        const stats = await getAddressBalanceStats(signer.address);
+        return { signer, confirmedSat: stats.confirmedSat };
       }));
-      const allUtxos = utxoGroups.flatMap((group) => group.list);
-      if (!allUtxos.length) throw new Error(`No confirmed UTXOs across ${keyring.main.address}, ${changeA.address}, ${changeB.address}`);
 
-      const totalByAddress = keyring.allSigners.reduce((acc, signer) => {
-        acc.set(signer.address, 0);
-        return acc;
-      }, new Map());
-      allUtxos.forEach((utxo) => {
-        totalByAddress.set(utxo.sourceAddress, (totalByAddress.get(utxo.sourceAddress) || 0) + Number(utxo.value || 0));
+      const totalByAddress = new Map();
+      balanceGroups.forEach(bg => {
+        totalByAddress.set(bg.signer.address, bg.confirmedSat);
       });
+
       let feeRate = BTC_DEFAULT_FEE_RATE;
       try {
         const fr = await fetch(`${MEMPOOL_TESTNET_API}/v1/fees/recommended`);
@@ -2950,29 +2942,41 @@
       let selectedSource = null;
       let sel = [];
       let selTotal = 0;
+
+      setComposeStatus('Evaluating candidate funding sources…');
       for (const source of sourceCandidates) {
-        const pool = allUtxos
-          .filter((utxo) => utxo.sourceAddress === source.address)
-          .sort((a, b) => b.value - a.value);
-        const candidateSel = [];
-        let candidateTotal = 0;
-        for (const utxo of pool) {
-          candidateSel.push(utxo);
-          candidateTotal += utxo.value;
-          const estFee = estimateLegacyP2pkhFee(candidateSel.length, outSats.length + 1);
-          if (candidateTotal >= totalOut + estFee) break;
-        }
-        const candidateFee = estimateLegacyP2pkhFee(candidateSel.length, outSats.length + 1);
-        if (candidateSel.length && candidateTotal >= totalOut + candidateFee) {
-          selectedSource = source;
-          sel = candidateSel;
-          selTotal = candidateTotal;
-          break;
+        try {
+          const utxoResp = await fetch(`${MEMPOOL_TESTNET_API}/address/${source.address}/utxo`);
+          if (!utxoResp.ok) throw new Error(`UTXO fetch failed (${utxoResp.status})`);
+
+          const pool = (await utxoResp.json())
+            .filter(u => u.status?.confirmed)
+            .map((utxo) => ({ ...utxo, sourceAddress: source.address, signer: source }))
+            .sort((a, b) => b.value - a.value);
+
+          const candidateSel = [];
+          let candidateTotal = 0;
+          for (const utxo of pool) {
+            candidateSel.push(utxo);
+            candidateTotal += utxo.value;
+            const estFee = estimateLegacyP2pkhFee(candidateSel.length, outSats.length + 1);
+            if (candidateTotal >= totalOut + estFee) break;
+          }
+          const candidateFee = estimateLegacyP2pkhFee(candidateSel.length, outSats.length + 1);
+          if (candidateSel.length && candidateTotal >= totalOut + candidateFee) {
+            selectedSource = source;
+            sel = candidateSel;
+            selTotal = candidateTotal;
+            break;
+          }
+        } catch (err) {
+          console.warn(`Failed to fetch or build inputs from source ${source.address} (${source.label}):`, err);
         }
       }
+
       if (!selectedSource) {
-        const availableSat = allUtxos.reduce((sum, utxo) => sum + Number(utxo.value || 0), 0);
-        throw new Error(`Insufficient funds in a single source address for valid sendmany/change routing: need >= ${totalOut} sat + fee, available ${availableSat} sat`);
+        const availableSat = sourceCandidates.reduce((sum, s) => sum + (totalByAddress.get(s.address) || 0), 0);
+        throw new Error(`Insufficient funds in a single source address for valid sendmany/change routing: need >= ${totalOut} sat + fee, available ~${availableSat} sat confirmed`);
       }
       const fee = estimateLegacyP2pkhFee(sel.length, outSats.length + 1);
       const change = selTotal - totalOut - fee;
@@ -4063,20 +4067,44 @@
         return;
       }
       try {
-        setComposeStatus('Collecting change-address UTXOs…');
+        setComposeStatus('Evaluating change-address balances…');
         const keyring = await buildInternalWalletKeyring(internalPrivKeyBytes);
         const changeSigners = keyring.changeSigners.filter(Boolean);
         if (!changeSigners.length) throw new Error('Deterministic change keyring is unavailable');
-        const utxoGroups = await Promise.all(changeSigners.map(async (signer) => {
-          const utxoResp = await fetch(`${MEMPOOL_TESTNET_API}/address/${signer.address}/utxo`);
-          if (!utxoResp.ok) throw new Error(`UTXO fetch failed (${utxoResp.status}) for ${signer.label}`);
-          return (await utxoResp.json())
-            .filter((utxo) => utxo.status?.confirmed)
-            .map((utxo) => ({ ...utxo, signer }));
+
+        const fundedSigners = [];
+        await Promise.all(changeSigners.map(async (signer) => {
+          try {
+            const stats = await getAddressBalanceStats(signer.address);
+            if (stats.confirmedSat > 0) {
+              fundedSigners.push(signer);
+            }
+          } catch (err) {
+            console.warn(`Balance check failed for change address ${signer.address}:`, err);
+          }
+        }));
+
+        if (!fundedSigners.length) {
+          setComposeStatus('No confirmed change funds to consolidate');
+          return;
+        }
+
+        setComposeStatus('Collecting UTXOs from funded change addresses…');
+        const utxoGroups = await Promise.all(fundedSigners.map(async (signer) => {
+          try {
+            const utxoResp = await fetch(`${MEMPOOL_TESTNET_API}/address/${signer.address}/utxo`);
+            if (!utxoResp.ok) throw new Error(`UTXO fetch failed (${utxoResp.status}) for ${signer.label}`);
+            return (await utxoResp.json())
+              .filter((utxo) => utxo.status?.confirmed)
+              .map((utxo) => ({ ...utxo, signer }));
+          } catch (err) {
+            console.warn(`Skipping UTXOs for ${signer.address}:`, err);
+            return [];
+          }
         }));
         const utxos = utxoGroups.flat();
         if (!utxos.length) {
-          setComposeStatus('No confirmed change funds to consolidate');
+          setComposeStatus('Failed to collect UTXOs for consolidation');
           return;
         }
         let feeRate = BTC_DEFAULT_FEE_RATE;
