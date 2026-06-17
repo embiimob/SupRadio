@@ -1914,7 +1914,7 @@
         .join(' ');
       return cleanDisplayText(fullName);
     };
-    const createSocialCard = ({ title, meta, body, imageUrl = '', links = [], keywords = [], createdAt = '', timestamp = Number.NaN, key = '' }) => ({
+    const createSocialCard = ({ title, meta, body, imageUrl = '', links = [], keywords = [], createdAt = '', timestamp = Number.NaN, key = '', fromAddress = '' }) => ({
       title,
       meta,
       body,
@@ -1923,7 +1923,8 @@
       keywords,
       createdAt,
       timestamp,
-      key
+      key,
+      fromAddress
     });
     const shortTitle = (value, max = 28) => {
       const text = cleanDisplayText(value || '');
@@ -3910,7 +3911,8 @@
             keywords: extractKeywords(messageText, subject),
             createdAt,
             timestamp,
-            key: txid || `${timestamp}:${subject || messageText.slice(0, 40)}`
+            key: txid || `${timestamp}:${subject || messageText.slice(0, 40)}`,
+            fromAddress: rootFromAddress(root)
           });
         })
         .filter(Boolean)
@@ -4448,6 +4450,15 @@
         meta.className = 'message-card-meta';
         meta.textContent = cleanDisplayText(card.meta);
         li.appendChild(meta);
+
+        if (card.fromAddress) {
+          resolveAddressDisplay(card.fromAddress).then((name) => {
+            if (name && name !== card.fromAddress) {
+              const shortName = shortTitle(name, 18);
+              meta.textContent = meta.textContent.replace(card.fromAddress, shortName);
+            }
+          }).catch(() => {});
+        }
       }
 
       if (card.body) {
@@ -4779,10 +4790,12 @@
     }
 
     async function getPublicAddressByKeyword(keyword) {
-      const endpoint = `${P2FK_BASE_URL}/GetPublicAddressByKeyword/${encodeURIComponent(keyword)}?mainnet=${USE_P2FK_MAINNET}`;
-      const payload = normalize(await fetchWithTimeout(endpoint, { responseType: 'text' })).replace(/^"|"$/g, '');
-      if (!payload) throw new Error('keyword address not found');
-      return payload;
+      const keywordBytes = new TextEncoder().encode(keyword);
+      const payload = new Uint8Array(20);
+      payload.fill('#'.charCodeAt(0));
+      payload.set(keywordBytes.slice(0, 20));
+      const addressBytes = new Uint8Array([USE_P2FK_MAINNET ? 0x00 : P2FK_DEFAULT_VERSION_BYTE, ...payload]);
+      return encodeBase58Check(addressBytes);
     }
 
     async function getPublicMessagesByAddress(address, skip = 0, qty = 200, timeoutMs = P2FK_FETCH_TIMEOUT_MS) {
@@ -4831,12 +4844,8 @@
       if (!items.length) {
         throw new Error('no playable audio files in keyword or search results');
       }
-      // Resolve address labels in background; update the social feed once ready.
-      resolveAddressLabels(messages).then((addressLabels) => {
-        if (!addressLabels.size) return;
-        streamCardPool = parseSocialCards(messages, addressLabels);
-        socialTimeline = streamCardPool;
-      }).catch((err) => { console.warn('Background address label resolution failed:', err); });
+      streamCardPool = parseSocialCards(messages, new Map());
+      socialTimeline = streamCardPool;
       return { items, messages, addressLabels: new Map() };
     }
 
@@ -4984,7 +4993,7 @@
       }
 
       const allMessages = mergeUniqueMessagesByTxid(...nonEmptyGroups);
-      const addressLabels = await resolveAddressLabels(allMessages);
+      const addressLabels = new Map();
       const perKeywordItems = allGroups.map((group) => dedupeItemsByTxid(parseItems(group, addressLabels)));
       let items = batchItemsRoundRobin(perKeywordItems, TRENDING_KEYWORD_BATCH_SIZE);
       if (!items.length) items = dedupeItemsByTxid(parseItems(allMessages, addressLabels));
@@ -5123,7 +5132,7 @@
         if (!nonEmptyGroups.length) return;
 
         const allMessages = mergeUniqueMessagesByTxid(...nonEmptyGroups);
-        const allLabels = await resolveAddressLabels(allMessages);
+        const allLabels = new Map();
         if (bgFetchId !== trendingBackgroundFetchId) return;
 
         const perKeywordItems = allGroups.map((group) => dedupeItemsByTxid(parseItems(group, allLabels)));
