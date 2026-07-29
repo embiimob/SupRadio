@@ -2833,11 +2833,13 @@
         const signer = await buildWalletSignerEntry(derivedPrivBytes, `change-${i + 1}`);
         const stats = await getAddressBalanceStats(signer.address).catch(() => ({ confirmedSat: 0, unconfirmedSat: 0, txCount: 0, utxoCount: 0, fundedTxoCount: 0 }));
         signer.fundedTxoCount = stats.fundedTxoCount || 0;
-        if (i >= 1 && stats.txCount === 0) break;
-        // Skip exhausted addresses (0 balance, funded_txo_count > 450) — spam-filter threshold exceeded
+        // Include signer unless it is a spent-out 0-balance address that exceeds the spam filter threshold
         const totalBalance = (stats.confirmedSat || 0) + (stats.unconfirmedSat || 0);
-        if (totalBalance === 0 && signer.fundedTxoCount > 450) continue;
-        changeSigners.push(signer);
+        if (!(totalBalance === 0 && signer.fundedTxoCount > 450)) {
+          changeSigners.push(signer);
+        }
+        // Stop scanning once we reach a completely unused address
+        if (i >= 1 && stats.txCount === 0) break;
       }
       internalWalletKeyring = { main, changeSigners, allSigners: [main, ...changeSigners] };
       return internalWalletKeyring;
@@ -3034,7 +3036,7 @@
         for (let nextIdx = keyring.changeSigners.length; nextIdx < 200; nextIdx++) {
           const derivedPrivBytes = await deriveDeterministicInternalPrivKey(internalPrivKeyBytes, `slot-${nextIdx + 1}`);
           const newChange = await buildWalletSignerEntry(derivedPrivBytes, `change-${nextIdx + 1}`);
-          const newStats = await getAddressBalanceStats(newChange.address).catch(() => ({ fundedTxoCount: 0, utxoCount: 0 }));
+          const newStats = await getAddressBalanceStats(newChange.address).catch(() => ({ fundedTxoCount: 0 }));
           newChange.fundedTxoCount = newStats.fundedTxoCount || 0;
           keyring.changeSigners.push(newChange);
           keyring.allSigners.push(newChange);
@@ -4200,7 +4202,7 @@
         if (sendSat < BTC_DUST_LIMIT_SAT) {
           throw new Error(`Consolidation output would be dust after fee (${sendSat} sat)`);
         }
-        const mainStats = await getAddressBalanceStats(keyring.main.address).catch(() => ({ utxoCount: 0, fundedTxoCount: 0 }));
+        const mainStats = await getAddressBalanceStats(keyring.main.address).catch(() => ({ fundedTxoCount: 0 }));
         let targetAddress = keyring.main.address;
 
         if ((mainStats.fundedTxoCount || 0) > 450) {
