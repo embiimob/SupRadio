@@ -1488,6 +1488,7 @@
     const INTERNAL_CHANGE_DERIVATION_PREFIX = 'sup:testnet3:change:';
     const CHANGE_ADDRESS_MAX_SLOTS = 200;      // Maximum number of deterministic change address slots
     const CHANGE_ADDRESS_SPAM_LIMIT = 450;     // Max funded_txo_count before an address is considered exhausted
+    const DEFAULT_ADDRESS_STATS = { confirmedSat: 0, unconfirmedSat: 0, txCount: 0, utxoCount: 0, fundedTxoCount: 0 };
     const MEMPOOL_TESTNET_API = 'https://mempool.space/testnet/api';
     const BTC_DUST_LIMIT_SAT = 546; // P2PKH dust threshold in satoshis
     const COMPOSER_AMOUNT_PER_RECIPIENT = BTC_DUST_LIMIT_SAT / 1e8;
@@ -2174,7 +2175,7 @@
 
     async function getAddressBalanceStats(address) {
       const cleanAddress = cleanDisplayText(address || '');
-      if (!cleanAddress) return { confirmedSat: 0, unconfirmedSat: 0, txCount: 0, utxoCount: 0, fundedTxoCount: 0 };
+      if (!cleanAddress) return { ...DEFAULT_ADDRESS_STATS };
       const response = await fetch(`${MEMPOOL_TESTNET_API}/address/${encodeURIComponent(cleanAddress)}`);
       if (!response.ok) throw new Error(`Balance lookup failed (${response.status})`);
       const payload = await response.json();
@@ -2826,6 +2827,23 @@
       };
     }
 
+    // Scans deterministic change address slots beyond keyring.changeSigners.length until one is found
+    // with fundedTxoCount <= CHANGE_ADDRESS_SPAM_LIMIT, adds it to the keyring, and returns it (or null).
+    async function findNextValidChangeAddress(keyring) {
+      for (let nextIdx = keyring.changeSigners.length; nextIdx < CHANGE_ADDRESS_MAX_SLOTS; nextIdx++) {
+        const derivedPrivBytes = await deriveDeterministicInternalPrivKey(internalPrivKeyBytes, `slot-${nextIdx + 1}`);
+        const newChange = await buildWalletSignerEntry(derivedPrivBytes, `change-${nextIdx + 1}`);
+        const newStats = await getAddressBalanceStats(newChange.address).catch(() => DEFAULT_ADDRESS_STATS);
+        newChange.fundedTxoCount = newStats.fundedTxoCount || 0;
+        if (newChange.fundedTxoCount <= CHANGE_ADDRESS_SPAM_LIMIT) {
+          keyring.changeSigners.push(newChange);
+          keyring.allSigners.push(newChange);
+          return newChange;
+        }
+      }
+      return null;
+    }
+
     async function buildInternalWalletKeyring(basePrivBytes) {
       if (internalWalletKeyring) return internalWalletKeyring;
       const main = await buildWalletSignerEntry(basePrivBytes, 'main');
@@ -2833,7 +2851,7 @@
       for (let i = 0; i < CHANGE_ADDRESS_MAX_SLOTS; i += 1) {
         const derivedPrivBytes = await deriveDeterministicInternalPrivKey(basePrivBytes, `slot-${i + 1}`);
         const signer = await buildWalletSignerEntry(derivedPrivBytes, `change-${i + 1}`);
-        const stats = await getAddressBalanceStats(signer.address).catch(() => ({ confirmedSat: 0, unconfirmedSat: 0, txCount: 0, utxoCount: 0, fundedTxoCount: 0 }));
+        const stats = await getAddressBalanceStats(signer.address).catch(() => DEFAULT_ADDRESS_STATS);
         signer.fundedTxoCount = stats.fundedTxoCount || 0;
         // Include signer unless it is a spent-out 0-balance address that exceeds the spam filter threshold
         const totalBalance = (stats.confirmedSat || 0) + (stats.unconfirmedSat || 0);
@@ -3033,24 +3051,11 @@
       // Select change address: must have fundedTxoCount <= CHANGE_ADDRESS_SPAM_LIMIT (spam filter); prefer lowest count
       let validChanges = keyring.changeSigners.filter(c => (c.fundedTxoCount || 0) <= CHANGE_ADDRESS_SPAM_LIMIT);
       if (validChanges.length === 0) {
-        // Scan for fresh slots beyond the current keyring
-        let found = false;
-        for (let nextIdx = keyring.changeSigners.length; nextIdx < CHANGE_ADDRESS_MAX_SLOTS; nextIdx++) {
-          const derivedPrivBytes = await deriveDeterministicInternalPrivKey(internalPrivKeyBytes, `slot-${nextIdx + 1}`);
-          const newChange = await buildWalletSignerEntry(derivedPrivBytes, `change-${nextIdx + 1}`);
-          const newStats = await getAddressBalanceStats(newChange.address).catch(() => ({ fundedTxoCount: 0 }));
-          newChange.fundedTxoCount = newStats.fundedTxoCount || 0;
-          keyring.changeSigners.push(newChange);
-          keyring.allSigners.push(newChange);
-          if (newChange.fundedTxoCount <= CHANGE_ADDRESS_SPAM_LIMIT) {
-            validChanges.push(newChange);
-            found = true;
-            break;
-          }
-        }
-        if (!found) {
+        const freshSlot = await findNextValidChangeAddress(keyring);
+        if (!freshSlot) {
           throw new Error(`All ${CHANGE_ADDRESS_MAX_SLOTS} change address slots have exceeded the spam filter limit (${CHANGE_ADDRESS_SPAM_LIMIT} funded outputs). Cannot create change output.`);
         }
+        validChanges.push(freshSlot);
       }
 
       // Always use the address with the lowest funded_txo_count
@@ -4204,34 +4209,22 @@
         if (sendSat < BTC_DUST_LIMIT_SAT) {
           throw new Error(`Consolidation output would be dust after fee (${sendSat} sat)`);
         }
-        const mainStats = await getAddressBalanceStats(keyring.main.address).catch(() => ({ fundedTxoCount: 0 }));
+        const mainStats = await getAddressBalanceStats(keyring.main.address).catch(() => DEFAULT_ADDRESS_STATS);
         let targetAddress = keyring.main.address;
 
         if ((mainStats.fundedTxoCount || 0) > CHANGE_ADDRESS_SPAM_LIMIT) {
           let validChanges = [];
           for (const c of keyring.changeSigners) {
-            const stats = await getAddressBalanceStats(c.address).catch(() => ({ fundedTxoCount: 0 }));
+            const stats = await getAddressBalanceStats(c.address).catch(() => DEFAULT_ADDRESS_STATS);
             c.fundedTxoCount = stats.fundedTxoCount || 0;
             if (c.fundedTxoCount <= CHANGE_ADDRESS_SPAM_LIMIT) {
               validChanges.push(c);
             }
           }
           if (validChanges.length === 0) {
-            let found = false;
-            for (let nextIdx = keyring.changeSigners.length; nextIdx < CHANGE_ADDRESS_MAX_SLOTS; nextIdx++) {
-              const derivedPrivBytes = await deriveDeterministicInternalPrivKey(internalPrivKeyBytes, `slot-${nextIdx + 1}`);
-              const newChange = await buildWalletSignerEntry(derivedPrivBytes, `change-${nextIdx + 1}`);
-              const newStats = await getAddressBalanceStats(newChange.address).catch(() => ({ fundedTxoCount: 0 }));
-              newChange.fundedTxoCount = newStats.fundedTxoCount || 0;
-              keyring.changeSigners.push(newChange);
-              keyring.allSigners.push(newChange);
-              if (newChange.fundedTxoCount <= CHANGE_ADDRESS_SPAM_LIMIT) {
-                validChanges.push(newChange);
-                found = true;
-                break;
-              }
-            }
-            if (!found) throw new Error(`All ${CHANGE_ADDRESS_MAX_SLOTS} change address slots have exceeded the spam filter limit (${CHANGE_ADDRESS_SPAM_LIMIT} funded outputs). Cannot consolidate.`);
+            const freshSlot = await findNextValidChangeAddress(keyring);
+            if (!freshSlot) throw new Error(`All ${CHANGE_ADDRESS_MAX_SLOTS} change address slots have exceeded the spam filter limit (${CHANGE_ADDRESS_SPAM_LIMIT} funded outputs). Cannot consolidate.`);
+            validChanges.push(freshSlot);
           }
           validChanges.sort((a, b) => (a.fundedTxoCount || 0) - (b.fundedTxoCount || 0));
           targetAddress = validChanges[0].address;
@@ -4282,7 +4275,7 @@
         const validChanges = [];
 
         await Promise.all(keyring.allSigners.map(async (signer) => {
-          let stats = { confirmedSat: 0, utxoCount: 0, fundedTxoCount: 0 };
+          let stats = { ...DEFAULT_ADDRESS_STATS };
           try {
             stats = await getAddressBalanceStats(signer.address);
           } catch (err) {
@@ -4312,21 +4305,9 @@
         }
 
         if (validChanges.length === 0) {
-          let found = false;
-          for (let nextIdx = keyring.changeSigners.length; nextIdx < CHANGE_ADDRESS_MAX_SLOTS; nextIdx++) {
-            const derivedPrivBytes = await deriveDeterministicInternalPrivKey(internalPrivKeyBytes, `slot-${nextIdx + 1}`);
-            const newChange = await buildWalletSignerEntry(derivedPrivBytes, `change-${nextIdx + 1}`);
-            const newStats = await getAddressBalanceStats(newChange.address).catch(() => ({ fundedTxoCount: 0 }));
-            newChange.fundedTxoCount = newStats.fundedTxoCount || 0;
-            keyring.changeSigners.push(newChange);
-            keyring.allSigners.push(newChange);
-            if (newChange.fundedTxoCount <= CHANGE_ADDRESS_SPAM_LIMIT) {
-              validChanges.push({ signer: newChange, fundedTxoCount: 0 });
-              found = true;
-              break;
-            }
-          }
-          if (!found) throw new Error(`All ${CHANGE_ADDRESS_MAX_SLOTS} change address slots have exceeded the spam filter limit (${CHANGE_ADDRESS_SPAM_LIMIT} funded outputs). Cannot consolidate.`);
+          const freshSlot = await findNextValidChangeAddress(keyring);
+          if (!freshSlot) throw new Error(`All ${CHANGE_ADDRESS_MAX_SLOTS} change address slots have exceeded the spam filter limit (${CHANGE_ADDRESS_SPAM_LIMIT} funded outputs). Cannot consolidate.`);
+          validChanges.push({ signer: freshSlot, fundedTxoCount: freshSlot.fundedTxoCount || 0 });
         }
 
         validChanges.sort((a, b) => (a.fundedTxoCount || 0) - (b.fundedTxoCount || 0));
