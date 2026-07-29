@@ -1486,6 +1486,8 @@
     const INTERNAL_WALLET_PBKDF2_ITERATIONS = 600000;
     const INTERNAL_CHANGE_ADDRESS_COUNT = 2;
     const INTERNAL_CHANGE_DERIVATION_PREFIX = 'sup:testnet3:change:';
+    const CHANGE_ADDRESS_MAX_SLOTS = 200;      // Maximum number of deterministic change address slots
+    const CHANGE_ADDRESS_SPAM_LIMIT = 450;     // Max funded_txo_count before an address is considered exhausted
     const MEMPOOL_TESTNET_API = 'https://mempool.space/testnet/api';
     const BTC_DUST_LIMIT_SAT = 546; // P2PKH dust threshold in satoshis
     const COMPOSER_AMOUNT_PER_RECIPIENT = BTC_DUST_LIMIT_SAT / 1e8;
@@ -2828,14 +2830,14 @@
       if (internalWalletKeyring) return internalWalletKeyring;
       const main = await buildWalletSignerEntry(basePrivBytes, 'main');
       const changeSigners = [];
-      for (let i = 0; i < 200; i += 1) {
+      for (let i = 0; i < CHANGE_ADDRESS_MAX_SLOTS; i += 1) {
         const derivedPrivBytes = await deriveDeterministicInternalPrivKey(basePrivBytes, `slot-${i + 1}`);
         const signer = await buildWalletSignerEntry(derivedPrivBytes, `change-${i + 1}`);
         const stats = await getAddressBalanceStats(signer.address).catch(() => ({ confirmedSat: 0, unconfirmedSat: 0, txCount: 0, utxoCount: 0, fundedTxoCount: 0 }));
         signer.fundedTxoCount = stats.fundedTxoCount || 0;
         // Include signer unless it is a spent-out 0-balance address that exceeds the spam filter threshold
         const totalBalance = (stats.confirmedSat || 0) + (stats.unconfirmedSat || 0);
-        if (totalBalance !== 0 || signer.fundedTxoCount <= 450) {
+        if (totalBalance !== 0 || signer.fundedTxoCount <= CHANGE_ADDRESS_SPAM_LIMIT) {
           changeSigners.push(signer);
         }
         // Stop scanning once we reach a completely unused address
@@ -3028,26 +3030,26 @@
       const change = selTotal - totalOut - fee;
       if (change < 0) throw new Error(`Insufficient funds: need ${totalOut + fee} sat, have ${selTotal} sat`);
 
-      // Select change address: must have funded_txo_count <= 450 (spam filter); prefer lowest count
-      let validChanges = keyring.changeSigners.filter(c => (c.fundedTxoCount || 0) <= 450);
+      // Select change address: must have fundedTxoCount <= CHANGE_ADDRESS_SPAM_LIMIT (spam filter); prefer lowest count
+      let validChanges = keyring.changeSigners.filter(c => (c.fundedTxoCount || 0) <= CHANGE_ADDRESS_SPAM_LIMIT);
       if (validChanges.length === 0) {
         // Scan for fresh slots beyond the current keyring
         let found = false;
-        for (let nextIdx = keyring.changeSigners.length; nextIdx < 200; nextIdx++) {
+        for (let nextIdx = keyring.changeSigners.length; nextIdx < CHANGE_ADDRESS_MAX_SLOTS; nextIdx++) {
           const derivedPrivBytes = await deriveDeterministicInternalPrivKey(internalPrivKeyBytes, `slot-${nextIdx + 1}`);
           const newChange = await buildWalletSignerEntry(derivedPrivBytes, `change-${nextIdx + 1}`);
           const newStats = await getAddressBalanceStats(newChange.address).catch(() => ({ fundedTxoCount: 0 }));
           newChange.fundedTxoCount = newStats.fundedTxoCount || 0;
           keyring.changeSigners.push(newChange);
           keyring.allSigners.push(newChange);
-          if (newChange.fundedTxoCount <= 450) {
+          if (newChange.fundedTxoCount <= CHANGE_ADDRESS_SPAM_LIMIT) {
             validChanges.push(newChange);
             found = true;
             break;
           }
         }
         if (!found) {
-          throw new Error('All 200 change address slots have exceeded the spam filter limit (450 funded outputs). Cannot create change output.');
+          throw new Error(`All ${CHANGE_ADDRESS_MAX_SLOTS} change address slots have exceeded the spam filter limit (${CHANGE_ADDRESS_SPAM_LIMIT} funded outputs). Cannot create change output.`);
         }
       }
 
@@ -4205,31 +4207,31 @@
         const mainStats = await getAddressBalanceStats(keyring.main.address).catch(() => ({ fundedTxoCount: 0 }));
         let targetAddress = keyring.main.address;
 
-        if ((mainStats.fundedTxoCount || 0) > 450) {
+        if ((mainStats.fundedTxoCount || 0) > CHANGE_ADDRESS_SPAM_LIMIT) {
           let validChanges = [];
           for (const c of keyring.changeSigners) {
             const stats = await getAddressBalanceStats(c.address).catch(() => ({ fundedTxoCount: 0 }));
             c.fundedTxoCount = stats.fundedTxoCount || 0;
-            if (c.fundedTxoCount <= 450) {
+            if (c.fundedTxoCount <= CHANGE_ADDRESS_SPAM_LIMIT) {
               validChanges.push(c);
             }
           }
           if (validChanges.length === 0) {
             let found = false;
-            for (let nextIdx = keyring.changeSigners.length; nextIdx < 200; nextIdx++) {
+            for (let nextIdx = keyring.changeSigners.length; nextIdx < CHANGE_ADDRESS_MAX_SLOTS; nextIdx++) {
               const derivedPrivBytes = await deriveDeterministicInternalPrivKey(internalPrivKeyBytes, `slot-${nextIdx + 1}`);
               const newChange = await buildWalletSignerEntry(derivedPrivBytes, `change-${nextIdx + 1}`);
               const newStats = await getAddressBalanceStats(newChange.address).catch(() => ({ fundedTxoCount: 0 }));
               newChange.fundedTxoCount = newStats.fundedTxoCount || 0;
               keyring.changeSigners.push(newChange);
               keyring.allSigners.push(newChange);
-              if (newChange.fundedTxoCount <= 450) {
+              if (newChange.fundedTxoCount <= CHANGE_ADDRESS_SPAM_LIMIT) {
                 validChanges.push(newChange);
                 found = true;
                 break;
               }
             }
-            if (!found) throw new Error('All 200 change address slots have exceeded the spam filter limit (450 funded outputs). Cannot consolidate.');
+            if (!found) throw new Error(`All ${CHANGE_ADDRESS_MAX_SLOTS} change address slots have exceeded the spam filter limit (${CHANGE_ADDRESS_SPAM_LIMIT} funded outputs). Cannot consolidate.`);
           }
           validChanges.sort((a, b) => (a.fundedTxoCount || 0) - (b.fundedTxoCount || 0));
           targetAddress = validChanges[0].address;
@@ -4288,7 +4290,7 @@
           }
           if (keyring.changeSigners.includes(signer)) {
             signer.fundedTxoCount = stats.fundedTxoCount || 0;
-            if ((stats.fundedTxoCount || 0) <= 450) {
+            if ((stats.fundedTxoCount || 0) <= CHANGE_ADDRESS_SPAM_LIMIT) {
               validChanges.push({ signer, fundedTxoCount: stats.fundedTxoCount || 0 });
             }
           }
@@ -4311,20 +4313,20 @@
 
         if (validChanges.length === 0) {
           let found = false;
-          for (let nextIdx = keyring.changeSigners.length; nextIdx < 200; nextIdx++) {
+          for (let nextIdx = keyring.changeSigners.length; nextIdx < CHANGE_ADDRESS_MAX_SLOTS; nextIdx++) {
             const derivedPrivBytes = await deriveDeterministicInternalPrivKey(internalPrivKeyBytes, `slot-${nextIdx + 1}`);
             const newChange = await buildWalletSignerEntry(derivedPrivBytes, `change-${nextIdx + 1}`);
             const newStats = await getAddressBalanceStats(newChange.address).catch(() => ({ fundedTxoCount: 0 }));
             newChange.fundedTxoCount = newStats.fundedTxoCount || 0;
             keyring.changeSigners.push(newChange);
             keyring.allSigners.push(newChange);
-            if (newChange.fundedTxoCount <= 450) {
+            if (newChange.fundedTxoCount <= CHANGE_ADDRESS_SPAM_LIMIT) {
               validChanges.push({ signer: newChange, fundedTxoCount: 0 });
               found = true;
               break;
             }
           }
-          if (!found) throw new Error('All 200 change address slots have exceeded the spam filter limit (450 funded outputs). Cannot consolidate.');
+          if (!found) throw new Error(`All ${CHANGE_ADDRESS_MAX_SLOTS} change address slots have exceeded the spam filter limit (${CHANGE_ADDRESS_SPAM_LIMIT} funded outputs). Cannot consolidate.`);
         }
 
         validChanges.sort((a, b) => (a.fundedTxoCount || 0) - (b.fundedTxoCount || 0));
