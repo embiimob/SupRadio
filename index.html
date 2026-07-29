@@ -2835,7 +2835,7 @@
         signer.fundedTxoCount = stats.fundedTxoCount || 0;
         // Include signer unless it is a spent-out 0-balance address that exceeds the spam filter threshold
         const totalBalance = (stats.confirmedSat || 0) + (stats.unconfirmedSat || 0);
-        if (!(totalBalance === 0 && signer.fundedTxoCount > 450)) {
+        if (totalBalance !== 0 || signer.fundedTxoCount <= 450) {
           changeSigners.push(signer);
         }
         // Stop scanning once we reach a completely unused address
@@ -3047,7 +3047,7 @@
           }
         }
         if (!found) {
-          throw new Error('All change addresses have exceeded the spam filter limit (450 funded outputs). Cannot create change output.');
+          throw new Error('All 200 change address slots have exceeded the spam filter limit (450 funded outputs). Cannot create change output.');
         }
       }
 
@@ -4229,7 +4229,7 @@
                 break;
               }
             }
-            if (!found) throw new Error('All change addresses have exceeded the spam filter limit (450 funded outputs). Cannot consolidate.');
+            if (!found) throw new Error('All 200 change address slots have exceeded the spam filter limit (450 funded outputs). Cannot consolidate.');
           }
           validChanges.sort((a, b) => (a.fundedTxoCount || 0) - (b.fundedTxoCount || 0));
           targetAddress = validChanges[0].address;
@@ -4324,7 +4324,7 @@
               break;
             }
           }
-          if (!found) throw new Error('No valid change addresses to consolidate to');
+          if (!found) throw new Error('All 200 change address slots have exceeded the spam filter limit (450 funded outputs). Cannot consolidate.');
         }
 
         validChanges.sort((a, b) => (a.fundedTxoCount || 0) - (b.fundedTxoCount || 0));
