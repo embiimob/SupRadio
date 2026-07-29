@@ -2172,7 +2172,7 @@
 
     async function getAddressBalanceStats(address) {
       const cleanAddress = cleanDisplayText(address || '');
-      if (!cleanAddress) return { confirmedSat: 0, unconfirmedSat: 0, txCount: 0, utxoCount: 0 };
+      if (!cleanAddress) return { confirmedSat: 0, unconfirmedSat: 0, txCount: 0, utxoCount: 0, fundedTxoCount: 0 };
       const response = await fetch(`${MEMPOOL_TESTNET_API}/address/${encodeURIComponent(cleanAddress)}`);
       if (!response.ok) throw new Error(`Balance lookup failed (${response.status})`);
       const payload = await response.json();
@@ -2182,7 +2182,8 @@
       const unconfirmedSat = Number(mempoolStats.funded_txo_sum || 0);
       const txCount = Number(chainStats.tx_count || 0) + Number(mempoolStats.tx_count || 0);
       const utxoCount = (Number(chainStats.funded_txo_count || 0) - Number(chainStats.spent_txo_count || 0)) + (Number(mempoolStats.funded_txo_count || 0) - Number(mempoolStats.spent_txo_count || 0));
-      return { confirmedSat, unconfirmedSat, txCount, utxoCount };
+      const fundedTxoCount = Number(chainStats.funded_txo_count || 0);
+      return { confirmedSat, unconfirmedSat, txCount, utxoCount, fundedTxoCount };
     }
 
     async function refreshWalletBalance() {
@@ -2830,9 +2831,13 @@
       for (let i = 0; i < 200; i += 1) {
         const derivedPrivBytes = await deriveDeterministicInternalPrivKey(basePrivBytes, `slot-${i + 1}`);
         const signer = await buildWalletSignerEntry(derivedPrivBytes, `change-${i + 1}`);
-        const stats = await getAddressBalanceStats(signer.address).catch(() => ({ confirmedSat: 0, unconfirmedSat: 0, txCount: 0, utxoCount: 0 }));
-        changeSigners.push(signer);
+        const stats = await getAddressBalanceStats(signer.address).catch(() => ({ confirmedSat: 0, unconfirmedSat: 0, txCount: 0, utxoCount: 0, fundedTxoCount: 0 }));
+        signer.fundedTxoCount = stats.fundedTxoCount || 0;
         if (i >= 1 && stats.txCount === 0) break;
+        // Skip exhausted addresses (0 balance, funded_txo_count > 450) — spam-filter threshold exceeded
+        const totalBalance = (stats.confirmedSat || 0) + (stats.unconfirmedSat || 0);
+        if (totalBalance === 0 && signer.fundedTxoCount > 450) continue;
+        changeSigners.push(signer);
       }
       internalWalletKeyring = { main, changeSigners, allSigners: [main, ...changeSigners] };
       return internalWalletKeyring;
@@ -2919,6 +2924,7 @@
       const balanceGroups = await Promise.all(keyring.allSigners.map(async (signer) => {
         const stats = await getAddressBalanceStats(signer.address);
         utxoCountByAddr.set(signer.address, stats.utxoCount || 0);
+        signer.fundedTxoCount = stats.fundedTxoCount || 0;
         return { signer, confirmedSat: stats.confirmedSat };
       }));
 
@@ -3020,32 +3026,32 @@
       const change = selTotal - totalOut - fee;
       if (change < 0) throw new Error(`Insufficient funds: need ${totalOut + fee} sat, have ${selTotal} sat`);
 
-      let validChanges = keyring.changeSigners.filter(c => (utxoCountByAddr.get(c.address) || 0) < 420);
+      // Select change address: must have funded_txo_count <= 450 (spam filter); prefer lowest count
+      let validChanges = keyring.changeSigners.filter(c => (c.fundedTxoCount || 0) <= 450);
       if (validChanges.length === 0) {
-        const nextIdx = keyring.changeSigners.length;
-        if (nextIdx < 200) {
+        // Scan for fresh slots beyond the current keyring
+        let found = false;
+        for (let nextIdx = keyring.changeSigners.length; nextIdx < 200; nextIdx++) {
           const derivedPrivBytes = await deriveDeterministicInternalPrivKey(internalPrivKeyBytes, `slot-${nextIdx + 1}`);
           const newChange = await buildWalletSignerEntry(derivedPrivBytes, `change-${nextIdx + 1}`);
+          const newStats = await getAddressBalanceStats(newChange.address).catch(() => ({ fundedTxoCount: 0, utxoCount: 0 }));
+          newChange.fundedTxoCount = newStats.fundedTxoCount || 0;
           keyring.changeSigners.push(newChange);
           keyring.allSigners.push(newChange);
-          validChanges.push(newChange);
-        } else {
-          throw new Error('All 200 change addresses have >= 420 UTXOs. Cannot create more change outputs.');
+          if (newChange.fundedTxoCount <= 450) {
+            validChanges.push(newChange);
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          throw new Error('All change addresses have exceeded the spam filter limit (450 funded outputs). Cannot create change output.');
         }
       }
 
-      let changeAddress = validChanges[0].address;
-      if (validChanges.length > 1) {
-        const lastIdx = validChanges.findIndex(c => c.address === lastChangeOutputAddress);
-        if (lastIdx >= 0) {
-          changeAddress = validChanges[(lastIdx + 1) % validChanges.length].address;
-        } else if (selectedSource && selectedSource.address) {
-          const selIdx = validChanges.findIndex(c => c.address === selectedSource.address);
-          if (selIdx >= 0) {
-            changeAddress = validChanges[(selIdx + 1) % validChanges.length].address;
-          }
-        }
-      }
+      // Always use the address with the lowest funded_txo_count
+      validChanges.sort((a, b) => (a.fundedTxoCount || 0) - (b.fundedTxoCount || 0));
+      const changeAddress = validChanges[0].address;
       lastChangeOutputAddress = changeAddress;
       const changeSigner = keyring.allSigners.find(s => s.address === changeAddress);
       if (!changeSigner) throw new Error('Could not resolve deterministic change destination');
@@ -4194,29 +4200,36 @@
         if (sendSat < BTC_DUST_LIMIT_SAT) {
           throw new Error(`Consolidation output would be dust after fee (${sendSat} sat)`);
         }
-        const mainStats = await getAddressBalanceStats(keyring.main.address).catch(() => ({utxoCount: 0}));
+        const mainStats = await getAddressBalanceStats(keyring.main.address).catch(() => ({ utxoCount: 0, fundedTxoCount: 0 }));
         let targetAddress = keyring.main.address;
 
-        if (mainStats.utxoCount >= 420) {
+        if ((mainStats.fundedTxoCount || 0) > 450) {
           let validChanges = [];
           for (const c of keyring.changeSigners) {
-            const stats = await getAddressBalanceStats(c.address).catch(() => ({utxoCount: 0}));
-            if (stats.utxoCount < 420) {
+            const stats = await getAddressBalanceStats(c.address).catch(() => ({ fundedTxoCount: 0 }));
+            c.fundedTxoCount = stats.fundedTxoCount || 0;
+            if (c.fundedTxoCount <= 450) {
               validChanges.push(c);
             }
           }
           if (validChanges.length === 0) {
-             const nextIdx = keyring.changeSigners.length;
-             if (nextIdx < 200) {
-               const derivedPrivBytes = await deriveDeterministicInternalPrivKey(internalPrivKeyBytes, `slot-${nextIdx + 1}`);
-               const newChange = await buildWalletSignerEntry(derivedPrivBytes, `change-${nextIdx + 1}`);
-               keyring.changeSigners.push(newChange);
-               keyring.allSigners.push(newChange);
-               validChanges.push(newChange);
-             } else {
-               throw new Error('All 200 change addresses have >= 420 UTXOs. Cannot consolidate.');
-             }
+            let found = false;
+            for (let nextIdx = keyring.changeSigners.length; nextIdx < 200; nextIdx++) {
+              const derivedPrivBytes = await deriveDeterministicInternalPrivKey(internalPrivKeyBytes, `slot-${nextIdx + 1}`);
+              const newChange = await buildWalletSignerEntry(derivedPrivBytes, `change-${nextIdx + 1}`);
+              const newStats = await getAddressBalanceStats(newChange.address).catch(() => ({ fundedTxoCount: 0 }));
+              newChange.fundedTxoCount = newStats.fundedTxoCount || 0;
+              keyring.changeSigners.push(newChange);
+              keyring.allSigners.push(newChange);
+              if (newChange.fundedTxoCount <= 450) {
+                validChanges.push(newChange);
+                found = true;
+                break;
+              }
+            }
+            if (!found) throw new Error('All change addresses have exceeded the spam filter limit (450 funded outputs). Cannot consolidate.');
           }
+          validChanges.sort((a, b) => (a.fundedTxoCount || 0) - (b.fundedTxoCount || 0));
           targetAddress = validChanges[0].address;
         }
 
@@ -4265,15 +4278,16 @@
         const validChanges = [];
 
         await Promise.all(keyring.allSigners.map(async (signer) => {
-          let stats = { confirmedSat: 0, utxoCount: 0 };
+          let stats = { confirmedSat: 0, utxoCount: 0, fundedTxoCount: 0 };
           try {
             stats = await getAddressBalanceStats(signer.address);
           } catch (err) {
             console.warn(`Balance check failed for address ${signer.address}:`, err);
           }
           if (keyring.changeSigners.includes(signer)) {
-            if (stats.utxoCount < 420) {
-              validChanges.push({ signer, utxoCount: stats.utxoCount });
+            signer.fundedTxoCount = stats.fundedTxoCount || 0;
+            if ((stats.fundedTxoCount || 0) <= 450) {
+              validChanges.push({ signer, fundedTxoCount: stats.fundedTxoCount || 0 });
             }
           }
           if (stats.confirmedSat <= 0) return;
@@ -4294,19 +4308,24 @@
         }
 
         if (validChanges.length === 0) {
-          const nextIdx = keyring.changeSigners.length;
-          if (nextIdx < 200) {
+          let found = false;
+          for (let nextIdx = keyring.changeSigners.length; nextIdx < 200; nextIdx++) {
             const derivedPrivBytes = await deriveDeterministicInternalPrivKey(internalPrivKeyBytes, `slot-${nextIdx + 1}`);
             const newChange = await buildWalletSignerEntry(derivedPrivBytes, `change-${nextIdx + 1}`);
+            const newStats = await getAddressBalanceStats(newChange.address).catch(() => ({ fundedTxoCount: 0 }));
+            newChange.fundedTxoCount = newStats.fundedTxoCount || 0;
             keyring.changeSigners.push(newChange);
             keyring.allSigners.push(newChange);
-            validChanges.push({ signer: newChange, utxoCount: 0 });
-          } else {
-            throw new Error('No valid change addresses to consolidate to');
+            if (newChange.fundedTxoCount <= 450) {
+              validChanges.push({ signer: newChange, fundedTxoCount: 0 });
+              found = true;
+              break;
+            }
           }
+          if (!found) throw new Error('No valid change addresses to consolidate to');
         }
 
-        validChanges.sort((a, b) => a.utxoCount - b.utxoCount);
+        validChanges.sort((a, b) => (a.fundedTxoCount || 0) - (b.fundedTxoCount || 0));
         const targetChangeSigner = validChanges[0].signer;
 
         let feeRate = BTC_DEFAULT_FEE_RATE;
