@@ -2827,14 +2827,18 @@
       };
     }
 
-    // Scans deterministic change address slots beyond keyring.changeSigners.length until one is found
+    // Scans deterministic change address slots beyond keyring.nextSlotIndex until one is found
     // with fundedTxoCount <= CHANGE_ADDRESS_SPAM_LIMIT, adds it to the keyring, and returns it (or null).
+    // Uses and updates keyring.nextSlotIndex so subsequent calls never re-scan the same slots.
     async function findNextValidChangeAddress(keyring, basePrivKeyBytes) {
-      for (let nextIdx = keyring.changeSigners.length; nextIdx < CHANGE_ADDRESS_MAX_SLOTS; nextIdx++) {
-        const derivedPrivBytes = await deriveDeterministicInternalPrivKey(basePrivKeyBytes, `slot-${nextIdx + 1}`);
-        const newChange = await buildWalletSignerEntry(derivedPrivBytes, `change-${nextIdx + 1}`);
+      const startIdx = keyring.nextSlotIndex !== undefined ? keyring.nextSlotIndex : keyring.changeSigners.length;
+      for (let nextIdx = startIdx; nextIdx < CHANGE_ADDRESS_MAX_SLOTS; nextIdx++) {
+        const slotNum = nextIdx + 1;
+        const derivedPrivBytes = await deriveDeterministicInternalPrivKey(basePrivKeyBytes, `slot-${slotNum}`);
+        const newChange = await buildWalletSignerEntry(derivedPrivBytes, `change-${slotNum}`);
         const newStats = await getAddressBalanceStats(newChange.address).catch(() => DEFAULT_ADDRESS_STATS);
         newChange.fundedTxoCount = newStats.fundedTxoCount || 0;
+        keyring.nextSlotIndex = nextIdx + 1; // advance past this slot regardless of validity
         if (newChange.fundedTxoCount <= CHANGE_ADDRESS_SPAM_LIMIT) {
           keyring.changeSigners.push(newChange);
           keyring.allSigners.push(newChange);
@@ -2848,6 +2852,7 @@
       if (internalWalletKeyring) return internalWalletKeyring;
       const main = await buildWalletSignerEntry(basePrivBytes, 'main');
       const changeSigners = [];
+      let nextSlotIndex = 0;
       for (let i = 0; i < CHANGE_ADDRESS_MAX_SLOTS; i += 1) {
         const derivedPrivBytes = await deriveDeterministicInternalPrivKey(basePrivBytes, `slot-${i + 1}`);
         const signer = await buildWalletSignerEntry(derivedPrivBytes, `change-${i + 1}`);
@@ -2858,10 +2863,11 @@
         if (totalBalance !== 0 || signer.fundedTxoCount <= CHANGE_ADDRESS_SPAM_LIMIT) {
           changeSigners.push(signer);
         }
+        nextSlotIndex = i + 1; // track highest scanned slot index (0-based)
         // Stop scanning once we reach a completely unused address
         if (i >= 1 && stats.txCount === 0) break;
       }
-      internalWalletKeyring = { main, changeSigners, allSigners: [main, ...changeSigners] };
+      internalWalletKeyring = { main, changeSigners, allSigners: [main, ...changeSigners], nextSlotIndex };
       return internalWalletKeyring;
     }
 
