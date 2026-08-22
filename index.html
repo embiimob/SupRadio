@@ -1495,10 +1495,10 @@
     const BTC_DEFAULT_FEE_RATE = 10; // sat/vbyte fallback when fee API is unreachable
     const BTC_MIN_FEE_RATE = 2; // sat/vbyte absolute minimum
     const IPFS_GATEWAY_URLS = [
-      'https://ipfs.io/ipfs/',
-      'https://cloudflare-ipfs.com/ipfs/',
-      'https://dweb.link/ipfs/',
-      'https://gateway.pinata.cloud/ipfs/'
+      'https://gateway.pinata.cloud/ipfs/',
+      'https://4everland.io/ipfs/',
+      'https://ipfs.filebase.io/ipfs/',
+      'https://hardbin.com/ipfs/'
     ];
     const USE_P2FK_MAINNET = false;
     const AUDIO_FILE_REGEX = /([a-zA-Z0-9\s._-]+\.(mp3|ogg|wav|flac|m4a|aac|opus|weba|oga))/i;
@@ -3453,12 +3453,25 @@
       return '';
     }
 
+    async function probeIpfsGatewayHead(url, timeoutMs = P2FK_FETCH_TIMEOUT_MS) {
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetch(url, { method: 'HEAD', cache: 'no-store', signal: controller.signal });
+        if (!response.ok) throw new Error(`request failed (${response.status})`);
+        return true;
+      } finally {
+        window.clearTimeout(timeoutId);
+      }
+    }
+
     async function waitForIpfsPreview(cid, path = '', tries = 8, gapMs = 2500) {
-      const checkUrl = buildIpfsPathUrl(cid, path, 0);
       for (let i = 0; i < tries; i += 1) {
         try {
-          const r = await fetch(checkUrl, { method: 'HEAD', cache: 'no-store' });
-          if (r.ok) return true;
+          await Promise.any(IPFS_GATEWAY_URLS.map((_, gatewayIndex) => (
+            probeIpfsGatewayHead(buildIpfsPathUrl(cid, path, gatewayIndex))
+          )));
+          return true;
         } catch { /* continue */ }
         if (i < tries - 1) await delay(gapMs);
       }
