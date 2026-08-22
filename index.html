@@ -3453,14 +3453,26 @@
       return '';
     }
 
+    async function probeIpfsGatewayHead(url, timeoutMs = P2FK_FETCH_TIMEOUT_MS) {
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetch(url, { method: 'HEAD', cache: 'no-store', signal: controller.signal });
+        if (!response.ok) throw new Error(`request failed (${response.status})`);
+        return true;
+      } finally {
+        window.clearTimeout(timeoutId);
+      }
+    }
+
     async function waitForIpfsPreview(cid, path = '', tries = 8, gapMs = 2500) {
       for (let i = 0; i < tries; i += 1) {
-        for (let gatewayIndex = 0; gatewayIndex < IPFS_GATEWAY_URLS.length; gatewayIndex += 1) {
-          try {
-            const r = await fetch(buildIpfsPathUrl(cid, path, gatewayIndex), { method: 'HEAD', cache: 'no-store' });
-            if (r.ok) return true;
-          } catch { /* continue */ }
-        }
+        try {
+          await Promise.any(IPFS_GATEWAY_URLS.map((_, gatewayIndex) => (
+            probeIpfsGatewayHead(buildIpfsPathUrl(cid, path, gatewayIndex))
+          )));
+          return true;
+        } catch { /* continue */ }
         if (i < tries - 1) await delay(gapMs);
       }
       return false;
