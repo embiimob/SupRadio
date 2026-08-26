@@ -4713,11 +4713,19 @@
       let nebulae = [];
       let animFrame = null;
       let running = false;
+      let lastWidth = 0;
+      let lastHeight = 0;
 
       function resize() {
-        canvas.width = canvas.offsetWidth || window.innerWidth;
-        canvas.height = canvas.offsetHeight || window.innerHeight;
-        seedParticles();
+        const nextWidth = canvas.offsetWidth || window.innerWidth;
+        const nextHeight = canvas.offsetHeight || window.innerHeight;
+        canvas.width = nextWidth;
+        canvas.height = nextHeight;
+        if (nextWidth !== lastWidth || nextHeight !== lastHeight) {
+          lastWidth = nextWidth;
+          lastHeight = nextHeight;
+          seedParticles();
+        }
       }
 
       function seedParticles() {
@@ -4792,9 +4800,8 @@
           animFrame = null;
         }
       }
-
       resize();
-      seedParticles();
+      resize();
       window.addEventListener('resize', resize);
       const observer = new MutationObserver(() => {
         if (dom.galacticScreen?.classList.contains('visible')) start();
@@ -4841,6 +4848,11 @@
         videoStatusByUrl.set(currentEntry.url, 'playing');
         updateTicker();
       }
+    }
+
+    function markAudioReady() {
+      currentAudioHasPlayed = true;
+      hideWaiting();
     }
 
     function showOffAir(message) {
@@ -5692,10 +5704,6 @@
     }
 
     function attachAudioListeners(audioEl) {
-      const markAudioReady = () => {
-        currentAudioHasPlayed = true;
-        hideWaiting();
-      };
       audioEl.addEventListener('ended', nextVideo);
       audioEl.addEventListener('error', () => {
         const activeItem = playQueue[0];
