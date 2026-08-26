@@ -4717,6 +4717,7 @@
       function resize() {
         canvas.width = canvas.offsetWidth || window.innerWidth;
         canvas.height = canvas.offsetHeight || window.innerHeight;
+        seedParticles();
       }
 
       function seedParticles() {
@@ -5691,6 +5692,10 @@
     }
 
     function attachAudioListeners(audioEl) {
+      const markAudioReady = () => {
+        currentAudioHasPlayed = true;
+        hideWaiting();
+      };
       audioEl.addEventListener('ended', nextVideo);
       audioEl.addEventListener('error', () => {
         const activeItem = playQueue[0];
@@ -5734,11 +5739,8 @@
       });
       audioEl.addEventListener('waiting', () => showWaiting('Buffering next stream…'));
       audioEl.addEventListener('stalled', () => showWaiting('Network is slow, waiting for stream data…'));
-      audioEl.addEventListener('playing', () => {
-        currentAudioHasPlayed = true;
-        hideWaiting();
-      });
-      audioEl.addEventListener('canplay', hideWaiting);
+      audioEl.addEventListener('playing', markAudioReady);
+      audioEl.addEventListener('canplay', markAudioReady);
       audioEl.addEventListener('timeupdate', () => {
         if (!dom.waitingOverlay.classList.contains('visible')) return;
         if (audioEl.paused || audioEl.seeking) return;
