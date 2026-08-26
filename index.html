@@ -404,6 +404,78 @@
       backdrop-filter: blur(4px);
     }
 
+    #galactic-screen {
+      position: absolute;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      pointer-events: none;
+      z-index: 2;
+      background:
+        radial-gradient(ellipse at 15% 55%, rgba(55, 10, 105, 0.60) 0%, transparent 52%),
+        radial-gradient(ellipse at 82% 18%, rgba(15, 50, 140, 0.50) 0%, transparent 48%),
+        radial-gradient(ellipse at 48% 88%, rgba(85, 8, 72, 0.45) 0%, transparent 46%),
+        radial-gradient(ellipse at 66% 44%, rgba(10, 80, 100, 0.35) 0%, transparent 40%),
+        #02020a;
+    }
+
+    #galactic-screen.visible { display: flex; }
+
+    #galactic-canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+    }
+
+    .galactic-label {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: .55rem;
+      animation: gal-float 9s ease-in-out infinite;
+      text-align: center;
+      padding: 0 1.5rem;
+      user-select: none;
+      pointer-events: none;
+    }
+
+    .galactic-label-main {
+      font-size: clamp(.95rem, 2.4vw, 1.55rem);
+      font-weight: 700;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      color: rgba(210, 232, 255, .95);
+      text-shadow:
+        0 0 14px rgba(130, 195, 255, .95),
+        0 0 34px rgba(90, 150, 255, .65),
+        0 0 68px rgba(60, 100, 255, .35);
+    }
+
+    .galactic-label-sub {
+      font-size: clamp(.65rem, 1.3vw, .95rem);
+      font-weight: 500;
+      letter-spacing: .1em;
+      color: rgba(170, 210, 255, .82);
+      text-shadow:
+        0 0 10px rgba(110, 175, 255, .75),
+        0 0 24px rgba(80, 130, 255, .45);
+    }
+
+    @keyframes gal-float {
+      0%   { transform: translate(0px, 0px); }
+      18%  { transform: translate(7px, -15px); }
+      36%  { transform: translate(-9px, -7px); }
+      55%  { transform: translate(5px, 13px); }
+      72%  { transform: translate(-6px, 5px); }
+      88%  { transform: translate(3px, -9px); }
+      100% { transform: translate(0px, 0px); }
+    }
+
     .off-air-screen {
       position: absolute;
       inset: 0;
@@ -475,6 +547,10 @@
     .hidden-ui .status,
     .hidden-ui .side-feed,
     .hidden-ui .waiting-overlay {
+      opacity: 0;
+    }
+
+    .hidden-ui #galactic-screen {
       opacity: 0;
       pointer-events: none;
     }
@@ -1210,6 +1286,13 @@
 <body>
   <main id="app">
     <audio id="player" crossorigin="anonymous" autoplay muted playsinline aria-label="SupRadio audio player" tabindex="0"></audio>
+    <div id="galactic-screen" aria-hidden="true">
+      <canvas id="galactic-canvas"></canvas>
+      <div class="galactic-label">
+        <span class="galactic-label-main">✦ Please Stand By ✦</span>
+        <span class="galactic-label-sub">Finding Galactic Relay Points…</span>
+      </div>
+    </div>
     <canvas id="visualizer-canvas" aria-hidden="true"></canvas>
     <img id="album-art" alt="Album art" aria-hidden="true" />
     <div class="overlay"></div>
@@ -1368,6 +1451,7 @@
       bannerTrendingList: document.getElementById('bannerTrendingList'),
       bannerTrendingEmpty: document.getElementById('bannerTrendingEmpty'),
       offAirScreen: document.getElementById('offAirScreen'),
+      galacticScreen: document.getElementById('galactic-screen'),
       waitingOverlay: document.getElementById('waitingOverlay'),
       waitingText: document.getElementById('waitingText'),
       waitingA11yText: document.getElementById('waitingA11yText'),
@@ -1448,12 +1532,12 @@
     const P2FK_FETCH_RETRY_ATTEMPTS = 2;
     const SEARCH_RECOVERY_RETRY_QTY = 120;
     const TRENDING_KEYWORD_FETCH_CONCURRENCY = 4;
-    const PRELOAD_COUNT = 5;
+    const PRELOAD_COUNT = 8;
     const TICKER_SCROLL_SPEED_PX_PER_SECOND = 44;
     const MS_PER_SECOND = 1000;
     const STREAM_RETRY_LIMIT = 1;
     const IPFS_GATEWAY_RETRY_LIMIT = 1;
-    const ACTIVE_STREAM_TIMEOUT_MS = 12000;
+    const ACTIVE_STREAM_TIMEOUT_MS = 45000;
     const READY_RANGE_START_ALLOWANCE_SECONDS = 0.75;
     const FULLY_BUFFERED_EPSILON_SECONDS = 0.35;
     const MESSAGE_ROTATION_INTERVAL_MS = 13500;
@@ -1540,6 +1624,8 @@
     const profileByUrnCache = new Map();
     let streamRetryCountByUrl = new Map();
     let activeStreamTimeoutId = null;
+    let currentAudioHasPlayed = false;
+    let galacticCanvasInitialized = false;
     let loadSearchRequestId = 0;
     let swipeTugResetTimeoutId = null;
     let pseudoFullscreenActive = false;
@@ -1980,7 +2066,7 @@
     const AUDIO_FILE_EXTENSION_REGEX = /\.(mp3|ogg|wav|flac|m4a|aac|opus|weba|oga)$/i;
     const IMAGE_FILE_EXTENSION_REGEX = /\.(png|jpe?g|gif|webp|avif)$/i;
     const IPFS_PATH_URL_REGEX = /\/ipfs\/([^/?#]+)(?:\/([^?#]+))?/i;
-    const IPFS_VIDEO_PROBE_TIMEOUT_MS = 11000;
+    const IPFS_VIDEO_PROBE_TIMEOUT_MS = 22000;
     const BTC_DECIMAL_PRECISION = 8;
     const PROFILE_IMAGE_GATEWAY_VARIANT_MULTIPLIER = 6;
     // Cap fallback attempts to keep profile-card image retries bounded across payloads with many
@@ -4613,11 +4699,127 @@
       dom.messages.replaceChildren();
     }
 
+    function initGalacticCanvas() {
+      if (galacticCanvasInitialized) return;
+      galacticCanvasInitialized = true;
+      const canvas = document.getElementById('galactic-canvas');
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      const STAR_COUNT = 220;
+      const NEBULA_COUNT = 12;
+      let stars = [];
+      let nebulae = [];
+      let animFrame = null;
+      let running = false;
+      let lastWidth = 0;
+      let lastHeight = 0;
+
+      function resize() {
+        const nextWidth = canvas.offsetWidth || window.innerWidth;
+        const nextHeight = canvas.offsetHeight || window.innerHeight;
+        canvas.width = nextWidth;
+        canvas.height = nextHeight;
+        if (nextWidth !== lastWidth || nextHeight !== lastHeight) {
+          lastWidth = nextWidth;
+          lastHeight = nextHeight;
+          seedParticles();
+        }
+      }
+
+      function seedParticles() {
+        stars = Array.from({ length: STAR_COUNT }, () => ({
+          x: Math.random() * canvas.width,
+          y: Math.random() * canvas.height,
+          r: Math.random() * 1.4 + 0.2,
+          speed: Math.random() * 0.25 + 0.04,
+          angle: Math.random() * Math.PI * 2,
+          twinkle: Math.random() * Math.PI * 2,
+          twinkleSpeed: Math.random() * 0.025 + 0.008,
+          color: Math.random() < 0.15
+            ? 'rgba(200,170,255,'
+            : Math.random() < 0.25
+              ? 'rgba(180,220,255,'
+              : 'rgba(210,230,255,'
+        }));
+        nebulae = Array.from({ length: NEBULA_COUNT }, () => ({
+          x: Math.random() * canvas.width,
+          y: Math.random() * canvas.height,
+          r: Math.random() * 80 + 40,
+          alpha: Math.random() * 0.08 + 0.03,
+          hue: Math.floor(Math.random() * 60) + 220,
+          pulse: Math.random() * Math.PI * 2,
+          pulseSpeed: Math.random() * 0.006 + 0.003
+        }));
+      }
+
+      function draw() {
+        if (!running) return;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        for (const nebula of nebulae) {
+          nebula.pulse += nebula.pulseSpeed;
+          const alpha = nebula.alpha + Math.sin(nebula.pulse) * 0.02;
+          const gradient = ctx.createRadialGradient(nebula.x, nebula.y, 0, nebula.x, nebula.y, nebula.r);
+          gradient.addColorStop(0, `hsla(${nebula.hue},80%,60%,${alpha})`);
+          gradient.addColorStop(1, `hsla(${nebula.hue},60%,40%,0)`);
+          ctx.beginPath();
+          ctx.arc(nebula.x, nebula.y, nebula.r, 0, Math.PI * 2);
+          ctx.fillStyle = gradient;
+          ctx.fill();
+        }
+        for (const star of stars) {
+          star.twinkle += star.twinkleSpeed;
+          star.x += Math.cos(star.angle) * star.speed;
+          star.y += Math.sin(star.angle) * star.speed;
+          if (star.x < -4) star.x = canvas.width + 4;
+          else if (star.x > canvas.width + 4) star.x = -4;
+          if (star.y < -4) star.y = canvas.height + 4;
+          else if (star.y > canvas.height + 4) star.y = -4;
+          const alpha = Math.abs(Math.sin(star.twinkle));
+          ctx.beginPath();
+          ctx.arc(star.x, star.y, star.r, 0, Math.PI * 2);
+          ctx.fillStyle = `${star.color}${alpha})`;
+          ctx.fill();
+        }
+        if (!running) return;
+        animFrame = requestAnimationFrame(draw);
+      }
+
+      function start() {
+        if (running) return;
+        running = true;
+        resize();
+        draw();
+      }
+
+      function stop() {
+        running = false;
+        if (animFrame) {
+          cancelAnimationFrame(animFrame);
+          animFrame = null;
+        }
+      }
+      resize();
+      window.addEventListener('resize', () => {
+        if (!running && !dom.galacticScreen?.classList.contains('visible')) return;
+        resize();
+      });
+      const observer = new MutationObserver(() => {
+        if (dom.galacticScreen?.classList.contains('visible')) start();
+        else stop();
+      });
+      if (dom.galacticScreen) observer.observe(dom.galacticScreen, { attributes: true, attributeFilter: ['class'] });
+    }
+
     function showWaiting(message) {
       dom.waitingText.textContent = waitingSymbolText(message);
       dom.waitingOverlay.setAttribute('aria-label', message || 'Buffering stream');
       dom.waitingA11yText.textContent = message || 'Buffering stream';
       dom.waitingOverlay.classList.add('visible');
+      if (!currentAudioHasPlayed && dom.galacticScreen) {
+        dom.galacticScreen.classList.add('visible');
+      }
       clearTimeout(activeStreamTimeoutId);
       activeStreamTimeoutId = window.setTimeout(() => {
         const activeItem = playQueue[0];
@@ -4639,6 +4841,7 @@
 
     function hideWaiting() {
       dom.waitingOverlay.classList.remove('visible');
+      dom.galacticScreen?.classList.remove('visible');
       if (activeStreamTimeoutId) {
         clearTimeout(activeStreamTimeoutId);
         activeStreamTimeoutId = null;
@@ -4647,6 +4850,11 @@
         videoStatusByUrl.set(currentEntry.url, 'playing');
         updateTicker();
       }
+    }
+
+    function markAudioReady() {
+      currentAudioHasPlayed = true;
+      hideWaiting();
     }
 
     function showOffAir(message) {
@@ -5234,6 +5442,7 @@
         return;
       }
       currentEntry = entry;
+      currentAudioHasPlayed = false;
       videoStatusByUrl.set(entry.url, 'playing');
       hideOffAir();
       updateTicker(playQueue, currentKeyword);
@@ -5540,8 +5749,8 @@
       });
       audioEl.addEventListener('waiting', () => showWaiting('Buffering next stream…'));
       audioEl.addEventListener('stalled', () => showWaiting('Network is slow, waiting for stream data…'));
-      audioEl.addEventListener('playing', hideWaiting);
-      audioEl.addEventListener('canplay', hideWaiting);
+      audioEl.addEventListener('playing', markAudioReady);
+      audioEl.addEventListener('canplay', markAudioReady);
       audioEl.addEventListener('timeupdate', () => {
         if (!dom.waitingOverlay.classList.contains('visible')) return;
         if (audioEl.paused || audioEl.seeking) return;
@@ -6230,6 +6439,7 @@
 
       window.addEventListener('resize', () => measureTicker());
       attachAudioListeners(dom.audio);
+      initGalacticCanvas();
       window.addEventListener('resize', resizeCanvas);
       // Resume AudioContext and request Wake Lock on any interaction (browser autoplay policy)
       document.addEventListener('click', () => {
