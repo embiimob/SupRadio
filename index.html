@@ -1625,6 +1625,7 @@
     let streamRetryCountByUrl = new Map();
     let activeStreamTimeoutId = null;
     let currentAudioHasPlayed = false;
+    let galacticCanvasInitialized = false;
     let loadSearchRequestId = 0;
     let swipeTugResetTimeoutId = null;
     let pseudoFullscreenActive = false;
@@ -4699,6 +4700,8 @@
     }
 
     function initGalacticCanvas() {
+      if (galacticCanvasInitialized) return;
+      galacticCanvasInitialized = true;
       const canvas = document.getElementById('galactic-canvas');
       if (!canvas) return;
       const ctx = canvas.getContext('2d');
@@ -4743,6 +4746,7 @@
       }
 
       function draw() {
+        if (!running) return;
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         for (const nebula of nebulae) {
           nebula.pulse += nebula.pulseSpeed;
@@ -4769,6 +4773,7 @@
           ctx.fillStyle = `${star.color}${alpha})`;
           ctx.fill();
         }
+        if (!running) return;
         animFrame = requestAnimationFrame(draw);
       }
 
