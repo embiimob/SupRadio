@@ -4801,7 +4801,6 @@
         }
       }
       resize();
-      resize();
       window.addEventListener('resize', resize);
       const observer = new MutationObserver(() => {
         if (dom.galacticScreen?.classList.contains('visible')) start();
@@ -4851,6 +4850,10 @@
     }
 
     function markAudioReady() {
+      if (currentAudioHasPlayed) {
+        hideWaiting();
+        return;
+      }
       currentAudioHasPlayed = true;
       hideWaiting();
     }
