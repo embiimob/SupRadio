@@ -4801,7 +4801,10 @@
         }
       }
       resize();
-      window.addEventListener('resize', resize);
+      window.addEventListener('resize', () => {
+        if (!running && !dom.galacticScreen?.classList.contains('visible')) return;
+        resize();
+      });
       const observer = new MutationObserver(() => {
         if (dom.galacticScreen?.classList.contains('visible')) start();
         else stop();
@@ -4850,10 +4853,6 @@
     }
 
     function markAudioReady() {
-      if (currentAudioHasPlayed) {
-        hideWaiting();
-        return;
-      }
       currentAudioHasPlayed = true;
       hideWaiting();
     }
