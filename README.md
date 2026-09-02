@@ -30,8 +30,8 @@ SupRadio currently has two main roles:
 At runtime SupRadio:
 
 1. Loads trending search stats from `GetTrendingRootSearches`.
-2. Picks up to 20 unique keywords.
-3. Fetches keyword-channel messages + search results per keyword.
+2. Picks up to 20 unique trending search terms.
+3. Interprets terms by intent: `@profile` terms resolve to profile-channel messages, while `#keyword` terms (and plain terms) use keyword-channel + root search results.
 4. Merges/dedupes by txid and builds a round-robin audio queue.
 5. Starts playback as soon as enough early results arrive (fast-start behavior).
 6. Reacts to playing audio data to render a single-file, 0-dependency canvas visualization.
@@ -78,7 +78,7 @@ This keeps the posting flow recoverable from a single root WIF while separating 
 
 | Endpoint | Purpose in SupRadio |
 | --- | --- |
-| `GET /GetTrendingRootSearches?qty=<n>` | Fetches trending search terms + stats used for trending UI and queue seed keywords. |
+| `GET /GetTrendingRootSearches?qty=<n>` | Fetches trending search terms + stats used for trending UI and queue seed terms (`@profile`, `#keyword`, or plain terms). |
 | `GET /GetPublicAddressByKeyword/<keyword>?mainnet=false` | Resolves keyword-channel address for that keyword. |
 | `GET /GetPublicMessagesByAddress/<address>?skip=<n>&qty=<n>&mainnet=false` | Pulls public channel messages for keyword/address timelines. |
 | `GET /GetKnownRootsBySearchString?searchString=<term>&skip=<n>&qty=<n>&mainnet=false&showSystemFiles=false` | Main searchable roots/messages query used by manual search and trending keyword expansion. |
