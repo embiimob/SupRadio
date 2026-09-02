@@ -5049,11 +5049,49 @@
       return getPublicMessagesByAddress(address, 0, 200, timeoutMs);
     }
 
+    async function getProfileAddressByUrnSearch(searchString) {
+      const rawSearch = normalize(searchString);
+      if (!rawSearch.startsWith('@')) throw new Error('profile search must start with @');
+      const profileUrn = cleanDisplayText(rawSearch.replace(/^@/, ''));
+      if (!profileUrn) throw new Error('profile urn is required after @');
+      const urnCandidates = [`@${profileUrn}`, profileUrn];
+      for (const urn of urnCandidates) {
+        const profile = await getProfileByURN(urn);
+        const creatorAddresses = extractCreatorAddresses(profile);
+        if (creatorAddresses.length) return creatorAddresses[0];
+      }
+      throw new Error(`profile address not found for @${profileUrn}`);
+    }
+
+    async function getProfileChannelMessages(searchString, timeoutMs = P2FK_FETCH_TIMEOUT_MS) {
+      const address = await getProfileAddressByUrnSearch(searchString);
+      return getPublicMessagesByAddress(address, 0, 5000, timeoutMs);
+    }
+
+    function parseSearchIntent(searchString) {
+      const normalizedSearch = normalize(searchString);
+      if (normalizedSearch.startsWith('@')) {
+        return { type: 'profile', term: normalizedSearch };
+      }
+      if (normalizedSearch.startsWith('#')) {
+        return { type: 'keyword', term: normalize(normalizedSearch.replace(/^#+/, '')) };
+      }
+      return { type: 'keyword', term: normalizedSearch };
+    }
+
     async function fetchTrendingKeywordMessages(keyword) {
+      const searchIntent = parseSearchIntent(keyword);
+      if (searchIntent.type === 'profile') {
+        return Promise.race([
+          getProfileChannelMessages(searchIntent.term),
+          new Promise((resolve) => setTimeout(() => resolve([]), TRENDING_KEYWORD_FETCH_TIMEOUT_MS))
+        ]).catch(() => []);
+      }
+      const keywordTerm = searchIntent.term;
       const [searchRaw, channelRaw] = await Promise.all([
-        getKnownRootsBySearchStringWithTimeout(keyword, 0, TRENDING_SEARCH_QTY).then(asArray).catch(() => []),
+        getKnownRootsBySearchStringWithTimeout(keywordTerm, 0, TRENDING_SEARCH_QTY).then(asArray).catch(() => []),
         Promise.race([
-          getKeywordChannelMessages(keyword),
+          getKeywordChannelMessages(keywordTerm),
           new Promise((resolve) => setTimeout(() => resolve([]), TRENDING_KEYWORD_FETCH_TIMEOUT_MS))
         ]).catch(() => [])
       ]);
@@ -5061,6 +5099,20 @@
     }
 
     async function queryP2FK(keyword, { maxSearchQty = STANDARD_SEARCH_QTY, timeoutMs = P2FK_FETCH_TIMEOUT_MS } = {}) {
+      const searchIntent = parseSearchIntent(keyword);
+      const normalizedKeyword = searchIntent.term;
+      if (searchIntent.type === 'profile') {
+        const profileMessages = await getProfileChannelMessages(searchIntent.term, timeoutMs);
+        const messages = mergeUniqueMessagesByTxid(profileMessages);
+        const items = dedupeItemsByTxid(parseItems(messages, new Map()));
+        if (!items.length) {
+          throw new Error(`no playable audio files found for @${normalizedKeyword.replace(/^@/, '')}`);
+        }
+        streamCardPool = parseSocialCards(messages, new Map());
+        socialTimeline = streamCardPool;
+        return { items, messages, addressLabels: new Map() };
+      }
+
       const [keywordChannelResult, mainSearchResult] = await Promise.allSettled([
         getKeywordChannelMessages(keyword, timeoutMs),
         getKnownRootsSearchWindow(keyword, maxSearchQty, timeoutMs)
