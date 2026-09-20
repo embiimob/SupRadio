@@ -1585,9 +1585,11 @@
     const DIRECT_AUDIO_REGEX = /(https?:\/\/[^\s<>"']+\.(mp3|ogg|wav|flac|m4a|aac|opus|weba|oga)(\?[^\s<>"']*)?)/i;
     const IMAGE_URL_REGEX = /(https?:\/\/[^\s<>"']+\.(png|jpe?g|gif|webp|avif)(\?[^\s<>"']*)?)/i;
     const URL_REGEX = /((?:https?:\/\/|www\.)[^\s<>"']+|\b(?:[a-z0-9-]{1,}\.)+[a-z]{2,}(?:\/[^\s<>"']*)?\b)/gi;
+    const DIRECT_AUDIO_EXTRACT_REGEX = new RegExp(DIRECT_AUDIO_REGEX.source, 'gi');
     const KEYWORD_REGEX = /#([a-zA-Z0-9_-]{2,32})/g;
     const IPFS_TOKEN_PATTERN_REGEX = /IPFS:([a-zA-Z0-9]{59}|[a-zA-Z0-9]{46})(?:[\\/]+([^\s<>"']+))?/;
     const IPFS_TOKEN_REGEX = new RegExp(IPFS_TOKEN_PATTERN_REGEX.source, 'gi');
+    const IPFS_AUDIO_EXTRACT_REGEX = /IPFS:([a-zA-Z0-9]{59}|[a-zA-Z0-9]{46})(?:[\\/]+([^<>]+?))?(?=>|\s*$)/gi;
     const LINK_OR_IPFS_TOKEN_REGEX = new RegExp(`(${IPFS_TOKEN_PATTERN_REGEX.source})|(${URL_REGEX.source})`, 'gi');
     const INLINE_TOKEN_REGEX = new RegExp(`(${IPFS_TOKEN_PATTERN_REGEX.source})|(${URL_REGEX.source})|(${KEYWORD_REGEX.source})`, 'gi');
     const IPFS_TOKEN_PARSER_REGEX = new RegExp(`^${IPFS_TOKEN_PATTERN_REGEX.source}$`, 'i');
@@ -3937,72 +3939,73 @@
 
     function parseItems(messages, addressLabels = new Map()) {
       const seen = new Set();
-      const isValidIpfsAudioMessage = (messageText) => {
-        const ipfsMatch = messageText.match(IPFS_REGEX);
-        const fileMatch = messageText.match(AUDIO_FILE_REGEX);
-        return { ipfsMatch, fileMatch, valid: Boolean(ipfsMatch && fileMatch) };
-      };
       return messages
-        .map((msg) => {
+        .flatMap((msg) => {
           const root = unwrapRootPayload(msg) || {};
           const messageText = normalizeRootMsg(root);
-          if (!messageText) return null;
+          if (!messageText) return [];
 
-          const directMatch = messageText.match(DIRECT_AUDIO_REGEX);
-          if (directMatch) {
+          const items = [];
+
+          for (const directMatch of messageText.matchAll(DIRECT_AUDIO_EXTRACT_REGEX)) {
             const directUrl = stripTrailingUrlPunctuation(directMatch[1]);
-            if (!directUrl) return null;
-            if (seen.has(directUrl)) return null;
-            seen.add(directUrl);
-            const title = cleanDisplayText(normalize(root?.Subject) || normalize(root?.subject) || 'Direct stream');
-            return {
-              url: directUrl,
-              title,
-              description: cleanDisplayText(messageText, MESSAGE_BODY_MAX_LENGTH),
-              tags: [],
-              links: extractLinks(messageText),
-              keywords: extractKeywords(messageText, title),
-              from: displayFromAddress(root, addressLabels),
-              createdAt: messageBlockDate(root),
-              hash: '',
-              subject: cleanDisplayText(normalize(root?.Subject || root?.subject || '')),
-              imageUrl: extractImageUrl(messageText),
-              txid: messageTxid(root),
-              timestamp: messageTimestamp(root)
-            };
+            if (directUrl && !seen.has(directUrl)) {
+              seen.add(directUrl);
+              const title = cleanDisplayText(normalize(root?.Subject) || normalize(root?.subject) || 'Direct stream');
+              items.push({
+                url: directUrl,
+                title,
+                description: cleanDisplayText(messageText, MESSAGE_BODY_MAX_LENGTH),
+                tags: [],
+                links: extractLinks(messageText),
+                keywords: extractKeywords(messageText, title),
+                from: displayFromAddress(root, addressLabels),
+                createdAt: messageBlockDate(root),
+                hash: '',
+                subject: cleanDisplayText(normalize(root?.Subject || root?.subject || '')),
+                imageUrl: extractImageUrl(messageText),
+                txid: messageTxid(root),
+                timestamp: messageTimestamp(root)
+              });
+            }
           }
 
-          const { ipfsMatch, fileMatch, valid } = isValidIpfsAudioMessage(messageText);
-          if (!valid) return null;
-          const hash = ipfsMatch[1];
-          const originalPath = normalize(ipfsMatch[2] || '');
-          const sourcePath = normalize(fileMatch[1] || '');
-          const filename = stripPathParts(sourcePath).trim();
-          const url = buildIpfsPathUrl(hash, '', 0);
-          if (seen.has(url)) return null;
-          seen.add(url);
+          for (const match of messageText.matchAll(IPFS_AUDIO_EXTRACT_REGEX)) {
+            const hash = match[1];
+            const originalPath = normalize(match[2] || '');
+            const fileMatch = originalPath.match(AUDIO_FILE_REGEX);
+            if (fileMatch) {
+              const url = buildIpfsPathUrl(hash, '', 0);
+              if (!seen.has(url)) {
+                seen.add(url);
+                const sourcePath = normalize(fileMatch[1] || '');
+                const filename = stripPathParts(sourcePath).trim();
 
-            return {
-              url,
-              title: cleanDisplayText(filename || `IPFS ${hash.slice(0, 12)}`),
-              description: cleanDisplayText(messageText, MESSAGE_BODY_MAX_LENGTH),
-              tags: [],
-              links: extractLinks(messageText),
-              keywords: extractKeywords(messageText, normalize(root?.Subject || root?.subject || filename)),
-              from: displayFromAddress(root, addressLabels),
-              createdAt: messageBlockDate(root),
-              hash,
-              path: '',
-              originalPath,
-              triedPath: false,
-              gatewayIndex: 0,
-              subject: cleanDisplayText(normalize(root?.Subject || root?.subject || '')),
-              imageUrl: extractImageUrl(messageText),
-              txid: messageTxid(root),
-              timestamp: messageTimestamp(root)
-            };
+                items.push({
+                  url,
+                  title: cleanDisplayText(filename || `IPFS ${hash.slice(0, 12)}`),
+                  description: cleanDisplayText(messageText, MESSAGE_BODY_MAX_LENGTH),
+                  tags: [],
+                  links: extractLinks(messageText),
+                  keywords: extractKeywords(messageText, normalize(root?.Subject || root?.subject || filename)),
+                  from: displayFromAddress(root, addressLabels),
+                  createdAt: messageBlockDate(root),
+                  hash,
+                  path: '',
+                  originalPath,
+                  triedPath: false,
+                  gatewayIndex: 0,
+                  subject: cleanDisplayText(normalize(root?.Subject || root?.subject || '')),
+                  imageUrl: extractImageUrl(messageText),
+                  txid: messageTxid(root),
+                  timestamp: messageTimestamp(root)
+                });
+              }
+            }
+          }
+
+          return items;
         })
-        .filter(Boolean)
         .sort((a, b) => sortByNewestTimestamp(a.timestamp, b.timestamp));
     }
 
