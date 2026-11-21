@@ -1574,6 +1574,19 @@
     const CHANGE_ADDRESS_SPAM_LIMIT = 450;     // Max funded_txo_count before an address is considered exhausted
     const DEFAULT_ADDRESS_STATS = { confirmedSat: 0, unconfirmedSat: 0, txCount: 0, utxoCount: 0, fundedTxoCount: 0 };
     const MEMPOOL_TESTNET_API = 'https://mempool.space/testnet/api';
+    const MEMPOOL_INTERVAL_MS = 10000;
+    const MEMPOOL_BURST = 10;
+    const MEMPOOL_TESTNET_APIS = [
+      MEMPOOL_TESTNET_API,
+      ...[
+        ['va1', [201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214]],
+        ['sv1', [201, 202, 203, 205, 206]],
+        ['hnl', [201, 202, 203, 204]],
+        ['fra', [201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214]],
+        ['tk7', [201, 202, 203, 204, 205, 206]],
+        ['sg1', [201, 202, 203, 204]]
+      ].flatMap(([region, nodes]) => nodes.map((node) => `https://node${node}.${region}.mempool.space/testnet/api`))
+    ];
     const BTC_DUST_LIMIT_SAT = 546; // P2PKH dust threshold in satoshis
     const COMPOSER_AMOUNT_PER_RECIPIENT = BTC_DUST_LIMIT_SAT / 1e8;
     const BTC_DEFAULT_FEE_RATE = 10; // sat/vbyte fallback when fee API is unreachable
@@ -1663,6 +1676,106 @@
 
     const normalize = (value) => (typeof value === 'string' ? value.trim() : '');
     const delay = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+    let mempoolPreferred = 0;
+    let mempoolBackoffUntil = 0;
+    let mempoolQueue = Promise.resolve();
+    const mempoolStarts = [];
+
+    function queueMempoolAttempt(start) {
+      const ready = mempoolQueue.then(async () => {
+        for (;;) {
+          const now = performance.now();
+          while (mempoolStarts.length && now - mempoolStarts[0] >= MEMPOOL_INTERVAL_MS) mempoolStarts.shift();
+          const nextStart = Math.max(mempoolBackoffUntil,
+            mempoolStarts.length >= MEMPOOL_BURST ? mempoolStarts[0] + MEMPOOL_INTERVAL_MS : 0);
+          if (now >= nextStart) {
+            mempoolStarts.push(now);
+            return { result: start() };
+          }
+          await delay(Math.min(nextStart - now, 2147483647));
+        }
+      });
+      mempoolQueue = ready.then(() => {}, () => {});
+      return ready.then(({ result }) => result);
+    }
+
+    function backOffMempool(retryAfter) {
+      const parsed = /^\d+$/.test(retryAfter || '') ? Number(retryAfter) * 1000
+        : Date.parse(retryAfter || '') - Date.now();
+      const wait = Number.isFinite(parsed) ? Math.max(MEMPOOL_INTERVAL_MS, parsed) : MEMPOOL_INTERVAL_MS;
+      mempoolBackoffUntil = Math.max(mempoolBackoffUntil, performance.now() + wait);
+    }
+
+    async function tryMempool(url, options) {
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), MEMPOOL_INTERVAL_MS);
+      try {
+        const response = await fetch(url, { ...options, signal: controller.signal, cache: 'no-store', redirect: 'error' });
+        if (response.status === 429) backOffMempool(response.headers.get('Retry-After'));
+        if (response.status === 429 || response.status === 408 || response.status >= 500) {
+          if (response.body) void response.body.cancel().catch(() => controller.abort());
+          return { status: response.status, ok: false, text: '' };
+        }
+        return { status: response.status, ok: response.ok, text: await response.text() };
+      } catch (error) {
+        if (controller.signal.aborted) throw new Error(`Mempool request timed out after 10 seconds: ${url}`);
+        throw error;
+      } finally {
+        window.clearTimeout(timer);
+      }
+    }
+
+    async function mempoolRequest(path, options = {}, decode = (text) => text) {
+      let endpoint;
+      let lastError;
+      const start = () => {
+        if (endpoint === undefined) endpoint = mempoolPreferred;
+        return tryMempool(`${MEMPOOL_TESTNET_APIS[endpoint]}${path}`, options);
+      };
+      for (let tried = 0; tried < MEMPOOL_TESTNET_APIS.length; tried += 1) {
+        let response;
+        try {
+          for (let attempt = 0; attempt < 3; attempt += 1) {
+            response = await queueMempoolAttempt(start);
+            if (response.status !== 429) break;
+          }
+          if (response.ok) return decode(response.text);
+        } catch (error) {
+          lastError = error;
+          response = undefined;
+        }
+        if (response && !response.ok) {
+          lastError = new Error(`Mempool HTTP ${response.status} for ${path}${response.text ? `: ${response.text.trim()}` : ''}`);
+          if (response.status !== 408 && response.status < 500) throw lastError;
+        }
+        const next = (endpoint + 1) % MEMPOOL_TESTNET_APIS.length;
+        if (mempoolPreferred === endpoint) mempoolPreferred = next;
+        endpoint = next;
+      }
+      throw new Error(`All Mempool Testnet3 endpoints failed for ${path}: ${lastError.message}`, { cause: lastError });
+    }
+
+    const mempoolJson = (path) => mempoolRequest(path, {}, JSON.parse);
+
+    async function broadcastMempoolTx(rawHex) {
+      try {
+        return await mempoolRequest('/tx', {
+          method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: rawHex
+        }, (text) => {
+          const txid = text.trim();
+          if (!/^[0-9a-f]{64}$/i.test(txid)) throw new Error('Invalid Mempool broadcast response');
+          return txid;
+        });
+      } catch (error) {
+        // A timed-out POST may have been accepted before its response was lost.
+        if (/^Mempool HTTP 4\d\d for \/tx:.*(?:txn-already-in-mempool|txn-already-known|Transaction already in block chain)/i.test(error.message)) {
+          return bytesToHex((await sha256Bytes(await sha256Bytes(hexToBytes(rawHex)))).reverse());
+        }
+        throw error;
+      }
+    }
+
     async function fetchWithTimeout(endpoint, {
       timeoutMs = P2FK_FETCH_TIMEOUT_MS,
       attempts = P2FK_FETCH_RETRY_ATTEMPTS,
@@ -2259,9 +2372,7 @@
     async function getAddressBalanceStats(address) {
       const cleanAddress = cleanDisplayText(address || '');
       if (!cleanAddress) return { ...DEFAULT_ADDRESS_STATS };
-      const response = await fetch(`${MEMPOOL_TESTNET_API}/address/${encodeURIComponent(cleanAddress)}`);
-      if (!response.ok) throw new Error(`Balance lookup failed (${response.status})`);
-      const payload = await response.json();
+      const payload = await mempoolJson(`/address/${encodeURIComponent(cleanAddress)}`);
       const chainStats = payload?.chain_stats || {};
       const mempoolStats = payload?.mempool_stats || {};
       const confirmedSat = (Number(chainStats.funded_txo_sum || 0) - Number(chainStats.spent_txo_sum || 0)) - Number(mempoolStats.spent_txo_sum || 0);
@@ -3046,9 +3157,11 @@
 
       let feeRate = BTC_DEFAULT_FEE_RATE;
       try {
-        const fr = await fetch(`${MEMPOOL_TESTNET_API}/v1/fees/recommended`);
-        feeRate = Math.max(((await fr.json()).halfHourFee) || BTC_DEFAULT_FEE_RATE, BTC_MIN_FEE_RATE);
-      } catch { /* use default */ }
+        const fr = await mempoolJson('/v1/fees/recommended');
+        feeRate = Math.max(fr.halfHourFee || BTC_DEFAULT_FEE_RATE, BTC_MIN_FEE_RATE);
+      } catch (error) {
+        console.warn('Fee estimate unavailable; using the default fee rate:', error);
+      }
 
       const estimateLegacyP2pkhFee = (inputsCount, outputsCount) => Math.ceil((10 + 148 * inputsCount + 34 * outputsCount) * feeRate);
       const outSats = sendManyOutputs.map(o => ({ address: o.address, valueSats: Math.round(o.amount * 1e8) }));
@@ -3069,10 +3182,7 @@
         if ((totalByAddress.get(source.address) || 0) < totalOut + estimateLegacyP2pkhFee(1, outSats.length + 1)) continue;
 
         try {
-          const utxoResp = await fetch(`${MEMPOOL_TESTNET_API}/address/${source.address}/utxo`);
-          if (!utxoResp.ok) throw new Error(`UTXO fetch failed (${utxoResp.status})`);
-
-          const pool = (await utxoResp.json())
+          const pool = (await mempoolJson(`/address/${encodeURIComponent(source.address)}/utxo`))
             .filter(u => u.status?.confirmed)
             .map((utxo) => ({ ...utxo, sourceAddress: source.address, signer: source }))
             .sort((a, b) => b.value - a.value);
@@ -3102,9 +3212,7 @@
         for (const sg of keyring.allSigners) {
           if ((totalByAddress.get(sg.address) || 0) > 0) {
             try {
-              const utxoResp = await fetch(`${MEMPOOL_TESTNET_API}/address/${sg.address}/utxo`);
-              if (!utxoResp.ok) throw new Error(`UTXO fetch failed (${utxoResp.status})`);
-              const pool = (await utxoResp.json())
+              const pool = (await mempoolJson(`/address/${encodeURIComponent(sg.address)}/utxo`))
                 .filter(u => u.status?.confirmed)
                 .map((utxo) => ({ ...utxo, sourceAddress: sg.address, signer: sg }));
               allUtxos.push(...pool);
@@ -3159,12 +3267,7 @@
       setComposeStatus(`Signing tx (${sel.length} inputs from ${selectedSource.label}, ${finalOuts.length} outputs, ~${fee} sat fee, change → ${changeSigner.label})…`);
       const rawHex = await buildSignedBtcTx(sel, finalOuts);
       setComposeStatus('Broadcasting transaction…');
-      const bcast = await fetch(`${MEMPOOL_TESTNET_API}/tx`, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: rawHex });
-      if (!bcast.ok) {
-        const errText = await bcast.text().catch(() => String(bcast.status));
-        throw new Error(`Broadcast failed: ${errText}`);
-      }
-      return (await bcast.text()).trim();
+      return broadcastMempoolTx(rawHex);
     }
 
     // ── Internal wallet UI handlers ───────────────────────────────────────────
@@ -4286,9 +4389,7 @@
         setComposeStatus('Collecting UTXOs from funded change addresses…');
         const utxoGroups = await Promise.all(fundedSigners.map(async (signer) => {
           try {
-            const utxoResp = await fetch(`${MEMPOOL_TESTNET_API}/address/${signer.address}/utxo`);
-            if (!utxoResp.ok) throw new Error(`UTXO fetch failed (${utxoResp.status}) for ${signer.label}`);
-            return (await utxoResp.json())
+            return (await mempoolJson(`/address/${encodeURIComponent(signer.address)}/utxo`))
               .filter((utxo) => utxo.status?.confirmed)
               .map((utxo) => ({ ...utxo, signer }));
           } catch (err) {
@@ -4303,9 +4404,11 @@
         }
         let feeRate = BTC_DEFAULT_FEE_RATE;
         try {
-          const fr = await fetch(`${MEMPOOL_TESTNET_API}/v1/fees/recommended`);
-          feeRate = Math.max(((await fr.json()).halfHourFee) || BTC_DEFAULT_FEE_RATE, BTC_MIN_FEE_RATE);
-        } catch { /* use default */ }
+          const fr = await mempoolJson('/v1/fees/recommended');
+          feeRate = Math.max(fr.halfHourFee || BTC_DEFAULT_FEE_RATE, BTC_MIN_FEE_RATE);
+        } catch (error) {
+          console.warn('Fee estimate unavailable; using the default fee rate:', error);
+        }
         const estimateFee = Math.ceil((10 + 148 * utxos.length + 34) * feeRate);
         const totalSat = utxos.reduce((sum, utxo) => sum + Number(utxo.value || 0), 0);
         const sendSat = totalSat - estimateFee;
@@ -4335,16 +4438,7 @@
 
         const rawHex = await buildSignedBtcTx(utxos, [{ address: targetAddress, valueSats: sendSat }]);
         setComposeStatus('Broadcasting consolidation transaction…');
-        const bcast = await fetch(`${MEMPOOL_TESTNET_API}/tx`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'text/plain' },
-          body: rawHex
-        });
-        if (!bcast.ok) {
-          const errText = await bcast.text().catch(() => String(bcast.status));
-          throw new Error(`Broadcast failed: ${errText}`);
-        }
-        const txid = (await bcast.text()).trim() || 'pending';
+        const txid = await broadcastMempoolTx(rawHex);
         const txUrl = txid !== 'pending' ? `https://mempool.space/testnet/tx/${txid}` : null;
         if (dom.composeStatus) {
           const prefix = `Consolidated ${sendSat.toLocaleString()} sat to ${shortTitle(targetAddress, 20)} · tx `;
@@ -4392,9 +4486,7 @@
           }
           if (stats.confirmedSat <= 0) return;
           try {
-            const utxoResp = await fetch(`${MEMPOOL_TESTNET_API}/address/${signer.address}/utxo`);
-            if (!utxoResp.ok) throw new Error(`UTXO fetch failed (${utxoResp.status}) for ${signer.label}`);
-            const utxos = (await utxoResp.json())
+            const utxos = (await mempoolJson(`/address/${encodeURIComponent(signer.address)}/utxo`))
               .filter((utxo) => utxo.status?.confirmed)
               .map((utxo) => ({ ...utxo, signer }));
             allUtxos.push(...utxos);
@@ -4418,9 +4510,11 @@
 
         let feeRate = BTC_DEFAULT_FEE_RATE;
         try {
-          const fr = await fetch(`${MEMPOOL_TESTNET_API}/v1/fees/recommended`);
-          feeRate = Math.max(((await fr.json()).halfHourFee) || BTC_DEFAULT_FEE_RATE, BTC_MIN_FEE_RATE);
-        } catch { /* use default */ }
+          const fr = await mempoolJson('/v1/fees/recommended');
+          feeRate = Math.max(fr.halfHourFee || BTC_DEFAULT_FEE_RATE, BTC_MIN_FEE_RATE);
+        } catch (error) {
+          console.warn('Fee estimate unavailable; using the default fee rate:', error);
+        }
         const estimateFee = Math.ceil((10 + 148 * allUtxos.length + 34) * feeRate);
         const totalSat = allUtxos.reduce((sum, utxo) => sum + Number(utxo.value || 0), 0);
         const sendSat = totalSat - estimateFee;
@@ -4429,16 +4523,7 @@
         }
         const rawHex = await buildSignedBtcTx(allUtxos, [{ address: targetChangeSigner.address, valueSats: sendSat }]);
         setComposeStatus('Broadcasting consolidation transaction…');
-        const bcast = await fetch(`${MEMPOOL_TESTNET_API}/tx`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'text/plain' },
-          body: rawHex
-        });
-        if (!bcast.ok) {
-          const errText = await bcast.text().catch(() => String(bcast.status));
-          throw new Error(`Broadcast failed: ${errText}`);
-        }
-        const txid = (await bcast.text()).trim() || 'pending';
+        const txid = await broadcastMempoolTx(rawHex);
         const txUrl = txid !== 'pending' ? `https://mempool.space/testnet/tx/${txid}` : null;
         if (dom.composeStatus) {
           const prefix = `Consolidated ${sendSat.toLocaleString()} sat to change ${shortTitle(targetChangeSigner.address, 20)} · tx `;
