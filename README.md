@@ -87,6 +87,8 @@ This keeps the posting flow recoverable from a single root WIF while separating 
 
 `MEMPOOL_TESTNET_API` default: `https://mempool.space/testnet/api`
 
+Each page shares a queue for wallet requests, limited to 10 attempts per 10 seconds. HTTP 429 pauses the queue for at least 10 seconds, respecting a longer exposed `Retry-After` header. Requests time out after 10 seconds and roll over from the primary endpoint to 47 regional Mempool nodes, retaining the working node for later requests. All requests use `/testnet/api`; availability, Testnet3 support, and browser CORS access can vary by node. Each contacted node can see wallet request metadata.
+
 | Endpoint | Purpose in SupRadio |
 | --- | --- |
 | `GET /address/<addr>` | Reads confirmed/unconfirmed balance stats for composer wallet panels. |
@@ -99,6 +101,7 @@ This keeps the posting flow recoverable from a single root WIF while separating 
 | Behavior | Purpose in SupRadio |
 | --- | --- |
 | `HEAD` request to candidate gateway URL | Validates that an attachment URL/URN resolves and is reachable before adding to post. |
+| `POST /ipfs` to p2fk.io | Uploads audio and image attachments; the deprecated `/ipfs/add` endpoint is not used. |
 
 ## Key configuration constants
 
